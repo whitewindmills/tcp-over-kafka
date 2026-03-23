@@ -89,7 +89,7 @@ func RunServer(ctx context.Context, cfg ServerConfig) error {
 }
 
 // serverOpenSession dials the target socket and registers a new server session.
-func serverOpenSession(ctx context.Context, bus *Bus, sessions *serverRegistry, defaultTarget string, maxFrame int, f frame.Frame) error {
+func serverOpenSession(ctx context.Context, bus tunnelBus, sessions *serverRegistry, defaultTarget string, maxFrame int, f frame.Frame) error {
 	if sessions.get(f.SessionID, f.ConnectionID) != nil {
 		return nil
 	}
@@ -129,14 +129,14 @@ func serverOpenSession(ctx context.Context, bus *Bus, sessions *serverRegistry, 
 }
 
 // startOutbound starts the goroutine that copies target bytes back into Kafka.
-func (s *serverSession) startOutbound(ctx context.Context, bus *Bus, sessions *serverRegistry, maxFrame int) {
+func (s *serverSession) startOutbound(ctx context.Context, bus tunnelBus, sessions *serverRegistry, maxFrame int) {
 	s.pumpOnce.Do(func() {
 		go serverPumpOutbound(ctx, bus, sessions, s, maxFrame)
 	})
 }
 
 // serverPumpOutbound copies target bytes to the client until the socket closes.
-func serverPumpOutbound(ctx context.Context, bus *Bus, sessions *serverRegistry, sess *serverSession, maxFrame int) {
+func serverPumpOutbound(ctx context.Context, bus tunnelBus, sessions *serverRegistry, sess *serverSession, maxFrame int) {
 	defer sessions.remove(sess.sessionID, sess.connectionID)
 
 	if maxFrame <= 0 {

@@ -10,6 +10,13 @@ import (
 	"tcp-over-kafka/internal/frame"
 )
 
+// tunnelBus is the transport contract used by the tunnel client and server.
+type tunnelBus interface {
+	Send(context.Context, frame.Frame) error
+	Receive(context.Context) (frame.Frame, error)
+	Close() error
+}
+
 // Bus wraps the Kafka writer/reader pair used by one tunnel endpoint.
 type Bus struct {
 	sendWriter *kafka.Writer

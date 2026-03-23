@@ -71,12 +71,12 @@ sequenceDiagram
 
 ## Internal Structure
 
-- [`cmd/tcp-over-kafka/main.go`](/opt/codes/poc/tcp-over-kafka/cmd/tcp-over-kafka/main.go) selects `client` or `server` mode.
-- [`internal/socks5/socks5.go`](/opt/codes/poc/tcp-over-kafka/internal/socks5/socks5.go) handles SOCKS5 greeting, CONNECT parsing, and replies.
-- [`internal/frame/frame.go`](/opt/codes/poc/tcp-over-kafka/internal/frame/frame.go) defines the binary frame format.
-- [`internal/tunnel/bus.go`](/opt/codes/poc/tcp-over-kafka/internal/tunnel/bus.go) wraps Kafka read/write operations.
-- [`internal/tunnel/client.go`](/opt/codes/poc/tcp-over-kafka/internal/tunnel/client.go) accepts SOCKS5 connections and forwards them into Kafka.
-- [`internal/tunnel/server.go`](/opt/codes/poc/tcp-over-kafka/internal/tunnel/server.go) consumes frames and relays them to the requested target socket.
+- [`cmd/tcp-over-kafka/main.go`](cmd/tcp-over-kafka/main.go) selects `client` or `server` mode.
+- [`internal/socks5/socks5.go`](internal/socks5/socks5.go) handles SOCKS5 greeting, CONNECT parsing, and replies.
+- [`internal/frame/frame.go`](internal/frame/frame.go) defines the binary frame format.
+- [`internal/tunnel/bus.go`](internal/tunnel/bus.go) wraps Kafka read/write operations.
+- [`internal/tunnel/client.go`](internal/tunnel/client.go) accepts SOCKS5 connections and forwards them into Kafka.
+- [`internal/tunnel/server.go`](internal/tunnel/server.go) consumes frames and relays them to the requested target socket.
 
 ### Frame Format
 
@@ -165,8 +165,9 @@ For a local demo, run a temporary TLS listener on the relay host and point the S
 
 ## Test Reports
 
-- Concurrency testing: [`docs/concurrency-test-report.md`](/opt/codes/poc/tcp-over-kafka/docs/concurrency-test-report.md)
-- File transfer and size-limit testing: [`docs/file-transfer-test-report.md`](/opt/codes/poc/tcp-over-kafka/docs/file-transfer-test-report.md)
+- Concurrency testing: [`docs/concurrency-test-report.md`](docs/concurrency-test-report.md)
+- File transfer and size-limit testing: [`docs/file-transfer-test-report.md`](docs/file-transfer-test-report.md)
+- Stability testing: [`docs/stability-test-report.md`](docs/stability-test-report.md)
 
 ## Operational Notes
 

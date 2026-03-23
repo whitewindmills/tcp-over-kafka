@@ -82,7 +82,7 @@ func RunClient(ctx context.Context, cfg ClientConfig) error {
 }
 
 // clientPumpOutbound streams local bytes into Kafka after the session is ready.
-func clientPumpOutbound(ctx context.Context, bus *Bus, sessions *clientRegistry, s *clientSession, maxFrame int) {
+func clientPumpOutbound(ctx context.Context, bus tunnelBus, sessions *clientRegistry, s *clientSession, maxFrame int) {
 	defer sessions.remove(s.sessionID, s.connectionID)
 
 	wait := time.NewTimer(10 * time.Second)
@@ -139,7 +139,7 @@ func clientPumpOutbound(ctx context.Context, bus *Bus, sessions *clientRegistry,
 }
 
 // clientReceiveLoop applies inbound control/data frames to active client sessions.
-func clientReceiveLoop(ctx context.Context, bus *Bus, sessions *clientRegistry) {
+func clientReceiveLoop(ctx context.Context, bus tunnelBus, sessions *clientRegistry) {
 	for {
 		f, err := bus.Receive(ctx)
 		if err != nil {
@@ -179,7 +179,7 @@ func clientReceiveLoop(ctx context.Context, bus *Bus, sessions *clientRegistry) 
 }
 
 // handleClientConn accepts the SOCKS5 CONNECT request and opens a tunnel session.
-func handleClientConn(ctx context.Context, bus *Bus, sessions *clientRegistry, conn net.Conn, cfg ClientConfig) {
+func handleClientConn(ctx context.Context, bus tunnelBus, sessions *clientRegistry, conn net.Conn, cfg ClientConfig) {
 	targetAddr, err := socks5.Accept(conn)
 	if err != nil {
 		log.Printf("socks5 handshake failed: %v", err)
@@ -216,7 +216,7 @@ func handleClientConn(ctx context.Context, bus *Bus, sessions *clientRegistry, c
 }
 
 // onOpenAck sends the SOCKS5 success reply and then marks the session ready.
-func (s *clientSession) onOpenAck(ctx context.Context, bus *Bus) error {
+func (s *clientSession) onOpenAck(ctx context.Context, bus tunnelBus) error {
 	s.handshakeMu.Lock()
 	if s.handshakeDone {
 		s.handshakeMu.Unlock()
