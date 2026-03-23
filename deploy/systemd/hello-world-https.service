@@ -1,0 +1,15 @@
+[Unit]
+Description=TCP over Kafka hello-world HTTPS service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/bin/hello_https_server.py --bind 0.0.0.0 --port 443 --cert /etc/tcp-over-kafka-hello/server.pem --key /etc/tcp-over-kafka-hello/server.key
+Restart=always
+RestartSec=1
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

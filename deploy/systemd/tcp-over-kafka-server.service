@@ -1,0 +1,15 @@
+[Unit]
+Description=TCP over Kafka relay server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/bin/tcp-over-kafka server --broker 10.253.15.166:9092 --tunnel-id poc-socks5 --group tcp-over-kafka-server-socks5
+Restart=always
+RestartSec=1
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target
