@@ -6,7 +6,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=root
-ExecStart=/usr/local/bin/tcp-over-kafka server --broker 10.253.15.166:9092 --tunnel-id poc-socks5 --group tcp-over-kafka-server-socks5
+ExecStart=/usr/local/libexec/tcp-over-kafka/run-server.sh
 Restart=always
 RestartSec=1
 NoNewPrivileges=yes

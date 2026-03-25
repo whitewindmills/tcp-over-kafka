@@ -2,41 +2,51 @@
 
 ## Project Structure & Module Organization
 
-- `cmd/tcp-over-kafka/` holds the main binary entrypoint and subcommands.
-- `internal/frame/` contains the wire-format codec used for Kafka messages.
-- `internal/tunnel/` contains the client/server relay logic and Kafka transport.
-- `deploy/systemd/` stores the unit files used on the VMs.
-- `README.md` documents the deployed topology and operator commands.
-- `session-note.md` is the recovery checkpoint for long sessions.
+`cmd/tcp-over-kafka/` contains the Cobra CLI entrypoint. Core packages live in
+`pkg/`: `frame` for the Kafka wire format, `socks5` for proxy negotiation,
+`sshproxy` for OpenSSH `ProxyCommand` bridging, and `tunnel` for client/server
+runtime logic and integration tests. Deployment assets live in
+`deploy/systemd/`, helper scripts and environment configuration live in
+`hack/`, and validation runbooks live in `docs/`.
 
 ## Build, Test, and Development Commands
 
-- `CGO_ENABLED=0 go test ./...` runs the full Go test suite.
-- `CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o tcp-over-kafka ./cmd/tcp-over-kafka` builds the binary.
-- `systemctl enable --now tcp-over-kafka-client` starts the client service on `10.253.15.167`.
-- `systemctl enable --now tcp-over-kafka-server` starts the server service on `10.253.15.168`.
+- `make fmt`: run `gofmt` across the Go source tree.
+- `make vet`: run `go vet` in vendor mode.
+- `make test`: run the full Go test suite with vendored dependencies.
+- `make build`: build `./bin/tcp-over-kafka`.
+- `./bin/tcp-over-kafka -v`: print the injected build version.
+- `make deploy-all`: deploy broker, client, and server with the default
+  `systemd` mode.
+- `make deploy-docker` / `make deploy-kubernetes`: deploy the same services
+  with the alternate supported modes.
 
 ## Coding Style & Naming Conventions
 
-- Use `gofmt` for all Go files; tabs are the default indentation.
-- Keep package names short and lower-case, matching existing paths such as `frame` and `tunnel`.
-- Prefer descriptive flag names like `--tunnel-id`, `--listen`, and `--target`.
-- Keep the binary protocol explicit and versioned; add new frame kinds rather than overloading existing ones.
+Use idiomatic Go and keep all files `gofmt`-compatible. Package names stay
+short and lower-case, matching directory names such as `frame` and `tunnel`.
+Prefer descriptive CLI flags like `--platform-id`, `--route`, and `--service`.
+When the Kafka protocol changes, add a new frame version instead of overloading
+existing fields.
 
 ## Testing Guidelines
 
-- Add table-driven tests for protocol and codec changes under the affected package, for example `internal/frame/frame_test.go`.
-- Prefer small unit tests over integration-heavy checks.
-- For deployment validation, verify broker reachability, direct SSH refusal between peers, and a tunneled SSH hostname check from `167`.
+Write tests as `*_test.go` files beside the package they cover. Prefer
+table-driven unit tests for parsing, validation, and codec logic, and keep
+integration coverage focused in `pkg/tunnel/`. Run `make test` before opening a
+PR. For env-backed smoke checks, use the runbooks in `docs/` from the repo root.
 
 ## Commit & Pull Request Guidelines
 
-- Use concise, imperative commit subjects, for example `Add frame round-trip tests`.
-- Include `Signed-off-by` in commit messages.
-- Keep pull requests focused on one change set and summarize the runtime impact.
-- Mention any deployment or operator steps that changed, especially if systemd units or VM setup are affected.
+Recent history uses short, imperative subjects such as `Add regression coverage and docs`.
+Keep commits focused and use a single-commit PR unless instructed otherwise.
+Include a `Signed-off-by:` trailer in every commit message. In PRs, summarize
+behavioral impact, list validation commands run, and call out deployment or
+operator changes when `hack/`, `deploy/systemd/`, or `README.md` changes.
 
-## Operational Notes
+## Configuration & Operations
 
-- Existing `mqtt-forward` services must be stopped before Kafka tunnel validation, but not removed.
-- The current POC uses Redpanda on `10.253.15.166:9092` and SSH tunneling between `10.253.15.167` and `10.253.15.168`.
+Treat `hack/.env.local` as the repo-local source of truth for deployment and
+validation settings. Keep path references in docs relative to the repository
+when possible, and do not spread environment-specific values across scripts,
+units, and runbooks.

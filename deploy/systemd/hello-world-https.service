@@ -6,7 +6,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=root
-ExecStart=/usr/local/bin/hello_https_server.py --bind 0.0.0.0 --port 443 --cert /etc/tcp-over-kafka-hello/server.pem --key /etc/tcp-over-kafka-hello/server.key
+ExecStart=/usr/local/libexec/tcp-over-kafka/run-hello-https.sh
 Restart=always
 RestartSec=1
 NoNewPrivileges=yes

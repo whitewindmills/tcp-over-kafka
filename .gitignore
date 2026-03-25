@@ -1,3 +1,4 @@
-tcp-over-kafka
+/bin/
+__pycache__/
 *.test
 coverage.out

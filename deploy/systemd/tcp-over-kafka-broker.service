@@ -1,0 +1,16 @@
+[Unit]
+Description=TCP over Kafka single-node broker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/libexec/tcp-over-kafka/run-broker.sh
+ExecStop=/usr/local/libexec/tcp-over-kafka/stop-broker.sh
+Restart=always
+RestartSec=1
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

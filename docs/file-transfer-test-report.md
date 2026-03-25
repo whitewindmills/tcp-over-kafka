@@ -1,78 +1,88 @@
-# tcp-over-kafka File Transfer Test Report
+# tcp-over-kafka File Transfer Test Runbook
 
-## Summary
+## Purpose
 
-I verified file transfer over the deployed `tcp-over-kafka` SSH proxy using `scp` through the built-in `proxy` subcommand, then expanded the same test into a progressive file-size sweep.
+Use this document to verify that the shared-topic tunnel preserves file contents for SSH `scp` transfers and larger payloads.
 
-Result:
-- A 1 MiB random file uploaded successfully from the client host to the relay host.
-- The relay-host checksum matched the source checksum.
-- The file downloaded back successfully to the client host.
-- The downloaded copy checksum matched the original checksum.
-- File sizes `1 MiB`, `4 MiB`, `16 MiB`, `64 MiB`, `256 MiB`, and `512 MiB` all succeeded.
-- The largest tested file size, `512 MiB`, also completed a round-trip download with a matching checksum.
+## Inputs
 
-Recommended file size limit for the current POC:
-- `512 MiB` per transfer, tested and verified
+Run these commands from the repository root. Source the environment file first:
 
-## Environment
+```bash
+set -a
+source ./hack/.env.local
+set +a
+```
 
-- Client host: `10.253.15.167`
-- Relay host: `10.253.15.168`
-- Proxy path: `tcp-over-kafka proxy --socks 127.0.0.1:1234`
-- SSH identity used for transfer: `/root/poc/ssh/id_ed25519`
-- Client service: `tcp-over-kafka-client.service`
-- Server service: `tcp-over-kafka-server.service`
+Build repeated flags and test targets:
 
-Service health during testing:
-- `tcp-over-kafka-client.service`: active
-- `tcp-over-kafka-server.service`: active
+```bash
+CLIENT_ROUTE_FLAGS=$(jq -r 'to_entries[] | "--route \(.key)=\(.value)"' <<<"$CLIENT_ROUTES_JSON")
+SERVER_SERVICE_FLAGS=$(jq -r 'to_entries[] | "--service \(.key)=\(.value)"' <<<"$SERVER_SERVICES_JSON")
+SSH_DESTINATION="${SSH_TEST_USER}@${SSH_TEST_HOST}"
+PROXY_COMMAND="./bin/tcp-over-kafka proxy --socks ${SOCKS_PROXY_ADDR} %h %p"
+PAYLOAD_PATH=./payload.bin
+```
 
-## Method
+## What To Run
 
-The transfer test used `scp` over the SSH ProxyCommand path to move a binary payload between the client and relay hosts.
+1. Start the tunnel endpoints with the shared topic.
 
-Test file:
-- Content: random data from `/dev/urandom`
-- Sweep sizes: `1 MiB`, `4 MiB`, `16 MiB`, `64 MiB`, `256 MiB`, `512 MiB`
+2. Generate a payload.
 
-Transfer flow:
-1. Upload the file from `10.253.15.167` to `10.253.15.168`.
-2. Verify the SHA-256 digest on both sides.
-3. Download the file back from `10.253.15.168` to `10.253.15.167`.
-4. Verify the return-transfer digest matches the original.
+```bash
+dd if=/dev/urandom of="$PAYLOAD_PATH" bs=1M count=1
+```
 
-## Results
+3. Copy the payload through the local SOCKS proxy path.
 
-Upload checksum for the initial 1 MiB transfer:
-- `b2ad438cc2f1f059c9e75f08a9c492c4113dd746f340b10da432cdf23a723632`
+```bash
+scp -o ProxyCommand="${PROXY_COMMAND}" \
+  "$PAYLOAD_PATH" "${SSH_DESTINATION}:${SCP_REMOTE_PATH}"
+```
 
-Round-trip verification at `512 MiB`:
-- Original checksum: `9acca8e8c22201155389f65abbf6bc9723edc7384ead80503839f49dcc56d767`
-- Downloaded checksum: `9acca8e8c22201155389f65abbf6bc9723edc7384ead80503839f49dcc56d767`
-- Match: `true`
+4. Compare checksums on both sides.
 
-Size sweep timing:
+```bash
+sha256sum "$PAYLOAD_PATH"
+ssh -o ProxyCommand="${PROXY_COMMAND}" \
+  "$SSH_DESTINATION" sha256sum "$SCP_REMOTE_PATH"
+```
 
-| Size | Upload Result | Elapsed |
-| --- | --- | --- |
-| 1 MiB | Pass | 0.470s |
-| 4 MiB | Pass | 0.536s |
-| 16 MiB | Pass | 0.945s |
-| 64 MiB | Pass | 2.391s |
-| 256 MiB | Pass | 8.397s |
-| 512 MiB | Pass | 15.643s |
+5. Sweep larger payload sizes:
 
-## Recommendation
+- `1 MiB`
+- `4 MiB`
+- `16 MiB`
+- `64 MiB`
+- `256 MiB`
+- `512 MiB`
 
-Recommended file size limit for routine use:
-- `512 MiB` per transfer
+## Expected Results
 
-Notes:
-- This is the largest size validated in the current environment.
-- No failure was observed through `512 MiB`, so this is a tested recommendation rather than a hard protocol ceiling.
-- If you need a more conservative operational target, `256 MiB` is also well within the measured stable range.
+- The upload checksum should match the checksum reported on the destination host.
+- Larger transfers should complete without truncation or corruption.
+- File contents should remain intact even when the proxy is carrying other traffic on the same topic.
 
-## Conclusion
+## Execution History
 
-The file transfer path is working end-to-end in both directions through the `tcp-over-kafka` SSH proxy, and the Kafka relay preserved file contents across both upload and download at the largest tested size.
+### 2026-03-25
+
+| Payload size | Local checksum | Remote checksum | Duration | Notes |
+| --- | --- | --- | --- | --- |
+| `1 MiB` | `163fcaf98ae843c8ed46685be68ab064e10cf89ba58e4913ce8870bd0bc64167` | `163fcaf98ae843c8ed46685be68ab064e10cf89ba58e4913ce8870bd0bc64167` | `2s` | pass |
+| `4 MiB` | `68e80157f1e33d160e6a03c8dbcf4638a194243b782ecfb3ac9a64e45e739aca` | `68e80157f1e33d160e6a03c8dbcf4638a194243b782ecfb3ac9a64e45e739aca` | `3s` | pass |
+| `16 MiB` | `30bd1e4e0ef721775248e9d4078884dfcea24889a2d84778c3d92b54a4a4dc67` | `30bd1e4e0ef721775248e9d4078884dfcea24889a2d84778c3d92b54a4a4dc67` | `4s` | pass |
+| `64 MiB` | `fc84e6edad25c9e4c5535a6cd137025349ce1ce9b74156fb1fda84199c36908c` | `fc84e6edad25c9e4c5535a6cd137025349ce1ce9b74156fb1fda84199c36908c` | `20s` | pass |
+| `256 MiB` | `809ac89c9648bc6f55a03763c11d9839fc9573a93f3900987697b978968b73a7` | `809ac89c9648bc6f55a03763c11d9839fc9573a93f3900987697b978968b73a7` | `70s` | pass |
+| `512 MiB` | `fabca6cb9dc63ea386da66535185968dce2bc66fac4ea4dc404bc30a60a849da` | `fabca6cb9dc63ea386da66535185968dce2bc66fac4ea4dc404bc30a60a849da` | `119s` | pass |
+
+- Environment source: `./hack/.env.local`
+- First failing size: none through `512 MiB`
+- Notes: checksum integrity remained stable through the full sweep
+
+## Troubleshooting
+
+- If the transfer fails before any bytes move, confirm that `CLIENT_ROUTES_JSON` includes the SSH target.
+- If the remote checksum differs, inspect tunnel logs for `KindClose` or `KindError`.
+- If large transfers stall, reduce the payload size and verify that both the broker and the remote target service are healthy.
