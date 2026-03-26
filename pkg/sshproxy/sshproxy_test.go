@@ -15,19 +15,14 @@ import (
 
 // TestRunWithFakeSocks5Server verifies Run relays stdin/stdout through a SOCKS5 handshake.
 func TestRunWithFakeSocks5Server(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	defer ln.Close()
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+	defer serverConn.Close()
+	payload := []byte("hello socks5 relay")
 
 	serverErr := make(chan error, 1)
 	go func() {
-		conn, err := ln.Accept()
-		if err != nil {
-			serverErr <- err
-			return
-		}
+		conn := serverConn
 		defer conn.Close()
 
 		var greet [3]byte
@@ -88,15 +83,20 @@ func TestRunWithFakeSocks5Server(t *testing.T) {
 			return
 		}
 
-		payload, err := io.ReadAll(conn)
-		if err != nil {
+		got := make([]byte, len(payload))
+		if _, err := io.ReadFull(conn, got); err != nil {
 			serverErr <- err
 			return
 		}
-		if _, err := conn.Write(payload); err != nil {
+		if !bytes.Equal(got, payload) {
+			serverErr <- io.ErrUnexpectedEOF
+			return
+		}
+		if _, err := conn.Write(got); err != nil {
 			serverErr <- err
 			return
 		}
+		_ = conn.Close()
 		serverErr <- nil
 	}()
 
@@ -126,10 +126,11 @@ func TestRunWithFakeSocks5Server(t *testing.T) {
 
 	runErr := make(chan error, 1)
 	go func() {
-		runErr <- Run(ctx, ln.Addr().String(), "example.com:22")
+		runErr <- run(ctx, "unused", "example.com:22", func(context.Context, string, string) (net.Conn, error) {
+			return clientConn, nil
+		})
 	}()
 
-	payload := []byte("hello socks5 relay")
 	if _, err := stdinW.Write(payload); err != nil {
 		t.Fatalf("write stdin: %v", err)
 	}

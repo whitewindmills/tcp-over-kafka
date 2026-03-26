@@ -1,93 +1,249 @@
 # tcp-over-kafka
 
-`tcp-over-kafka` is a proof-of-concept TCP tunnel that carries byte streams over
-Kafka. The client exposes a local SOCKS5 proxy, the tunnel publishes framed
-traffic to one shared Kafka topic, and the server reconstructs the TCP stream on
-the destination side.
+`tcp-over-kafka` is a proof-of-concept TCP tunnel that carries bidirectional
+TCP sessions over a single Kafka topic. The repository now implements a
+symmetric node model:
 
-## What This Repo Contains
+- every deployed node runs the same `tcp-over-kafka node` runtime
+- every node exposes a local SOCKS5 listener for outbound traffic
+- every node subscribes to the shared Kafka topic with its own consumer group
+- every node can also expose local services addressed by `platformID` and
+  `deviceID`
 
-- `client`: accepts local SOCKS5 `CONNECT` requests and publishes tunnel frames.
-- `server`: consumes frames from the shared topic, resolves the destination
-  device, and relays bytes to the target TCP service.
-- `proxy`: bridges OpenSSH `ProxyCommand` stdio to the local SOCKS5 listener.
-- `broker`: runs the Redpanda broker used by the POC deployment.
+The current deployment and validation flow is intentionally deterministic and
+repo-driven. Configuration starts in `./hack/.env.local`, deploy scripts render
+one JSON config per node, and the shell E2E suite validates SSH, HTTPS, and
+file transfer across the real environment.
 
-The transport model is intentionally simple:
+![Architecture Diagram](./docs/new-arch.png)
 
-- one Kafka topic carries all sessions
-- frames carry source and destination platform/device identities
-- the client route map resolves `host:port` requests to a destination identity
-- the server service map resolves a destination device ID to a real TCP target
+## Architecture
+
+### Topology
+
+The minimal deployment has three logical roles:
+
+- one Kafka-compatible broker
+- node A
+- node B
+
+Both nodes run the same binary and the same runtime model. There is no longer a
+public split between a dedicated client process and a dedicated server process.
+
+Each node owns:
+
+- one `platformID`, usually derived from the node identity such as its IP
+  address
+- one local SOCKS5 listen address for outbound TCP requests
+- one explicit route map from `host:port` to a remote `platformID/deviceID`
+- one explicit service map from `deviceID` to a local `host:port`
+
+### Identity And Addressing
+
+The tunnel routes traffic using two levels of identity:
+
+- `platformID`: identifies the remote node
+- `deviceID`: identifies the service exposed on that node
+
+Examples:
+
+- `10.253.15.168 / ssh`
+- `10.253.15.168 / web`
+
+Outbound SOCKS traffic always originates from the fixed internal source
+`deviceID` `proxy`. That keeps reply routing deterministic without exposing an
+extra operator-facing identifier.
+
+### Routing Model
+
+Each node has two independent maps:
+
+- `routes`
+  Maps an outbound `host:port` request to the remote `platformID/deviceID`
+  destination that should receive the tunnel session.
+- `services`
+  Maps an inbound `deviceID` to a local TCP target on the current node.
+
+Example:
+
+- route `10.253.15.168:22 -> { platformID: "10.253.15.168", deviceID: "ssh" }`
+- service `ssh -> 127.0.0.1:22`
+
+This means node A can open a SOCKS session to node B’s SSH service, and node B
+can do the same back to node A, using the same runtime and the same wire model.
+
+### Kafka Transport
+
+The transport uses one shared topic for all sessions. Every node consumes the
+same topic through a consumer group derived from its own `platformID`, so every
+node sees every message once and filters on `destinationPlatformID`.
+
+The Kafka message key is the stable conversation key derived from:
+
+- source endpoint
+- destination endpoint
+- connection ID
+
+That preserves ordering for frames that belong to the same logical TCP
+conversation.
+
+### Frame Lifecycle
+
+The wire format is binary and versioned in `./pkg/frame/`. The main frame kinds
+used by the runtime are:
+
+- `KindOpen`
+  Starts a new logical connection to a remote `platformID/deviceID`.
+- `KindOpenAck`
+  Confirms the destination service accepted the request.
+- `KindReady`
+  Signals that the destination side has finished its local dial and is ready to
+  exchange payload bytes.
+- `KindData`
+  Carries raw TCP payload bytes.
+- `KindClose`
+  Closes the logical conversation.
+- `KindError`
+  Returns an application-level routing or service failure.
+
+## Implementation
+
+### CLI Surface
+
+The public CLI has two commands:
+
+- `node`
+  Runs one symmetric Kafka tunnel node from a JSON config file.
+- `proxy`
+  Bridges OpenSSH `ProxyCommand` stdio into the local SOCKS5 listener.
+
+Examples:
+
+```bash
+./bin/tcp-over-kafka -v
+./bin/tcp-over-kafka node --config ./node-a.json
+./bin/tcp-over-kafka proxy --socks 127.0.0.1:12345 10.253.15.168 22
+```
+
+### Node Configuration
+
+Each node runtime reads one JSON config file. The deploy scripts render that
+file from `./hack/.env.local`.
+
+Example:
+
+```json
+{
+  "broker": "10.253.15.166:9092",
+  "topic": "tcp-over-kafka.single-topic.poc",
+  "platformID": "10.253.15.167",
+  "listen": "0.0.0.0:12345",
+  "maxFrameSize": 32768,
+  "routes": {
+    "10.253.15.168:22": {
+      "platformID": "10.253.15.168",
+      "deviceID": "ssh"
+    },
+    "10.253.15.168:443": {
+      "platformID": "10.253.15.168",
+      "deviceID": "web"
+    }
+  },
+  "services": {
+    "ssh": "127.0.0.1:22",
+    "web": "127.0.0.1:443"
+  }
+}
+```
+
+Field meanings:
+
+- `broker`
+  Kafka broker address used by the node.
+- `topic`
+  Shared topic that carries all sessions.
+- `platformID`
+  Unique identity for the current node.
+- `listen`
+  Local SOCKS5 listener address.
+- `maxFrameSize`
+  Maximum payload bytes copied into one frame.
+- `routes`
+  Outbound target map from `host:port` to remote `platformID/deviceID`.
+- `services`
+  Inbound service map from `deviceID` to a local TCP target.
+
+### Runtime Flow
+
+The runtime in `./pkg/tunnel/` does four main jobs:
+
+1. Accept SOCKS5 connections on the local listener.
+2. Resolve outbound `host:port` requests through the configured route map.
+3. Publish and consume frames over Kafka.
+4. Dial or accept local service sockets and relay payload bytes in both
+   directions.
+
+Implementation details that matter:
+
+- Kafka readers start at `LastOffset` for new deployments.
+- Unreadable frames are skipped instead of crashing the reader.
+- Consumer groups are derived from `platformID`.
+- The runtime keeps independent outbound and inbound session registries.
+- `KindData` writes now cache the session lookup before dereferencing it, which
+  avoids a nil-dereference race during teardown.
+
+### Deployment Implementation
+
+The repository uses `./hack/.env.local` as the repo-local source of truth. That
+file controls:
+
+- SSH access to the target hosts
+- broker address and broker deployment mode
+- node identities, listener addresses, routes, and services
+- deployment mode selection per component
+- HTTPS helper certificate paths
+- E2E payload sizes
+
+The deploy scripts render two kinds of remote artifacts:
+
+- one runtime env file for helper processes such as the broker wrapper and
+  HTTPS helper
+- one node JSON config per node
+
+Supported deployment modes:
+
+| Mode | Command | Notes |
+| --- | --- | --- |
+| `systemd` | `make deploy-all` or `make deploy-systemd` | Installs units, helper scripts, and rendered configs on the target hosts. |
+| `docker` | `make deploy-docker` | Runs the broker and node workloads as long-lived Docker containers. |
+| `kubernetes` | `make deploy-kubernetes` | Renders manifests with `./hack/render-kubernetes.sh` and applies them with `kubectl`. |
+| `external` | `make deploy-all` with `BROKER_DEPLOY_MODE=external` | Leaves an already-running broker in place and only validates that it is reachable. |
+
+Migration protections are built into the deploy path:
+
+- the systemd node deploy disables legacy `tcp-over-kafka-client` and
+  `tcp-over-kafka-server` units
+- the docker node deploy removes legacy split-role containers before starting
+  the node workload
+- the Kubernetes node deploy deletes the old split-role deployments before
+  applying the new manifests
+- the Kubernetes node manifests require anti-affinity so both host-networked
+  node pods cannot land on the same worker and fight over the same ports
 
 ## Quick Start
 
-1. Edit `./hack/.env.local` for your environment.
-2. Run the local checks.
+### Prerequisites
 
-```bash
-make test
-make build
-./bin/tcp-over-kafka -v
-```
+- Go `1.23` or newer
+- `jq`
+- `ssh` and `scp`
+- `sshpass` only if password-based SSH is used
+- Docker on target hosts when using Docker deploy mode
+- `kubectl` when using Kubernetes deploy mode
+- access to the hosts, broker, and HTTPS certificate paths defined in
+  `./hack/.env.local`
 
-3. Deploy with the default `systemd` flow.
-
-```bash
-make deploy-all
-```
-
-4. Load the env file and follow the validation runbooks.
-
-```bash
-set -a
-source ./hack/.env.local
-set +a
-```
-
-- [Stability Runbook](./docs/stability-test-report.md)
-- [Concurrency Runbook](./docs/concurrency-test-report.md)
-- [File Transfer Runbook](./docs/file-transfer-test-report.md)
-
-## Prerequisites
-
-- Go 1.23 or newer for local builds and tests
-- `jq` for expanding the JSON route and service maps in `./hack/.env.local`
-- `ssh` and `scp` for remote deployment
-- Docker on the broker host
-- `kubectl` only when using the Kubernetes deployment mode
-- Access to the hosts, certificates, and broker defined in `./hack/.env.local`
-
-## Repository Layout
-
-- `./cmd/tcp-over-kafka/`: Cobra entrypoint, root flags, and subcommands
-- `./pkg/frame/`: versioned Kafka frame codec
-- `./pkg/socks5/`: SOCKS5 handshake and proxy support
-- `./pkg/sshproxy/`: OpenSSH `ProxyCommand` bridge
-- `./pkg/tunnel/`: client/server runtime, routing, services, and tests
-- `./deploy/systemd/`: generic systemd units that call the `./hack/` wrappers
-- `./hack/`: env file, deployment scripts, helper scripts, and Kubernetes render
-  logic
-- `./docs/`: validation runbooks and execution history
-
-## Environment Model
-
-`./hack/.env.local` is the repo-local source of truth for:
-
-- SSH connection details for remote deployment
-- broker address and broker deployment settings
-- client and server identities
-- route and service mappings
-- deployment mode selection
-- validation targets and local SOCKS proxy address
-- HTTPS helper certificate paths
-
-Changing environments should only require editing `./hack/.env.local` and
-rerunning the relevant `make deploy-*` target.
-
-## Build, Test, And CLI
-
-Use the `Makefile` for the normal local workflow:
+### Build And Test
 
 ```bash
 make vendor
@@ -95,70 +251,90 @@ make fmt
 make vet
 make test
 make build
-```
-
-The release binary is written to `./bin/tcp-over-kafka`. The root command
-supports version output directly:
-
-```bash
 ./bin/tcp-over-kafka -v
-./bin/tcp-over-kafka --version
 ```
 
-Dependency resolution for `make vet`, `make test`, and `make build` runs in
-vendor mode. If `go.mod` or `go.sum` changes, refresh the checked-in
-dependencies with `make vendor`.
+The binary is written to `./bin/tcp-over-kafka`.
 
-## Deployment Modes
+### Configure The Environment
 
-`systemd` is the default deployment mode. The repo also supports `docker` and
-`kubernetes`, and each service can override the default independently through
-the variables in `./hack/.env.local`.
+Edit `./hack/.env.local` to match your target environment. The checked-in file
+already documents the expected variables for:
 
-| Mode | Primary command | What it does |
-| --- | --- | --- |
-| `systemd` | `make deploy-all` or `make deploy-systemd` | Copies the env file, binary, and helper scripts to the target hosts, installs generic systemd units, and enables the requested services. |
-| `docker` | `make deploy-docker` | Uses the remote deployment script to run the broker, client, and server as long-running Docker containers on the target hosts. |
-| `kubernetes` | `make deploy-kubernetes` | Renders manifests from `./hack/render-kubernetes.sh` and applies them with `kubectl`. |
+- broker host and deployment mode
+- node A and node B SSH hosts
+- per-node routes and service maps
+- HTTPS helper settings
+- E2E validation settings
 
-Component-specific deploy targets are also available:
-
-- `make deploy-broker`
-- `make deploy-client`
-- `make deploy-server`
-
-Mixed-mode deployment is supported through per-component overrides. Example:
+### Deploy
 
 ```bash
-BROKER_DEPLOY_MODE=docker \
-CLIENT_DEPLOY_MODE=systemd \
-SERVER_DEPLOY_MODE=kubernetes \
 make deploy-all
 ```
 
-The current Docker and Kubernetes flows keep the POC deployment model: the
-client and server binaries are still staged onto the target nodes, and the
-runtime uses host networking and host-mounted artifacts where the scripts expect
-them.
+Useful component-level deploy targets:
 
-## Validation Docs
+- `make deploy-broker`
+- `make deploy-node-a`
+- `make deploy-node-b`
 
-Validation history lives with the runbooks instead of in the README:
+Mixed deployment modes are supported. Example:
+
+```bash
+BROKER_DEPLOY_MODE=external \
+NODE_A_DEPLOY_MODE=systemd \
+NODE_B_DEPLOY_MODE=docker \
+make deploy-all
+```
+
+## Validation
+
+The shell E2E suite runs against the real environment from `./hack/.env.local`.
+
+```bash
+make e2e-test
+make e2e-test-ssh
+make e2e-test-https
+make e2e-test-file
+```
+
+The suite validates:
+
+- SSH through node A to node B and through node B to node A
+- HTTPS through both directions
+- file transfer integrity in both directions
+
+Validation runbooks:
 
 - [Stability Runbook](./docs/stability-test-report.md)
 - [Concurrency Runbook](./docs/concurrency-test-report.md)
 - [File Transfer Runbook](./docs/file-transfer-test-report.md)
 
-Each runbook includes the commands to run, the expected outcomes, and an
-execution history section for recording real runs.
+## Repository Layout
 
-## Implementation Notes
+- `./cmd/tcp-over-kafka/`
+  Cobra entrypoint and public commands.
+- `./pkg/frame/`
+  Versioned wire format and frame codec.
+- `./pkg/socks5/`
+  Minimal SOCKS5 handshake and proxy helpers.
+- `./pkg/sshproxy/`
+  OpenSSH `ProxyCommand` bridge for the local SOCKS listener.
+- `./pkg/tunnel/`
+  Symmetric node runtime, routing logic, config loading, Kafka bus, and tests.
+- `./deploy/systemd/`
+  systemd units for the broker, node runtime, and HTTPS helper.
+- `./hack/`
+  Environment file, deploy scripts, helper scripts, and E2E test entrypoints.
+- `./docs/`
+  Architecture asset and validation runbooks.
 
-- Frames are binary and versioned. Add a new frame version instead of
-  overloading the existing one.
-- Kafka ordering matters. The implementation keeps a stable conversation key per
-  connection.
-- `./pkg/tunnel/` starts live Kafka readers at `LastOffset` and skips unreadable
-  frames so stale topic history does not break a new deployment.
-- This project is intentionally scoped as a deterministic POC, not a
-  production-ready generic proxy.
+## Notes
+
+- This project is a deterministic proof of concept, not a production-ready
+  generic proxy.
+- When the wire format changes, add a new frame version rather than
+  overloading the current one.
+- The route and service maps are intentionally explicit. There is no dynamic
+  service discovery layer in this repository.

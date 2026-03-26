@@ -10,9 +10,20 @@ import (
 	"tcp-over-kafka/pkg/socks5"
 )
 
+type dialContextFunc func(context.Context, string, string) (net.Conn, error)
+
+func defaultDialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	var dialer net.Dialer
+	return dialer.DialContext(ctx, network, address)
+}
+
 // Run connects SSH ProxyCommand stdio to the local SOCKS5 listener and pumps bytes until EOF.
 func Run(ctx context.Context, socksAddr, target string) error {
-	conn, err := net.Dial("tcp", socksAddr)
+	return run(ctx, socksAddr, target, defaultDialContext)
+}
+
+func run(ctx context.Context, socksAddr, target string, dialContext dialContextFunc) error {
+	conn, err := dialContext(ctx, "tcp", socksAddr)
 	if err != nil {
 		return err
 	}

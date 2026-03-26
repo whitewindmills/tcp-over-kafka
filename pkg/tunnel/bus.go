@@ -3,10 +3,10 @@ package tunnel
 import (
 	"bytes"
 	"context"
-	"log"
 	"time"
 
 	"github.com/segmentio/kafka-go"
+	"k8s.io/klog/v2"
 
 	"tcp-over-kafka/pkg/frame"
 )
@@ -88,7 +88,7 @@ func (b *Bus) Receive(ctx context.Context) (frame.Frame, error) {
 		}
 		decoded, err := frame.Decode(bytes.NewReader(msg.Value))
 		if err != nil {
-			log.Printf("discarding unreadable frame on topic %s: %v", b.reader.Config().Topic, err)
+			klog.Warningf("Discarding unreadable frame on topic %s: %v", b.reader.Config().Topic, err)
 			continue
 		}
 		return decoded, nil

@@ -2,14 +2,16 @@ package main
 
 import (
 	"context"
-	"log"
 	"os"
 	"os/signal"
 	"syscall"
+
+	"k8s.io/klog/v2"
 )
 
 func main() {
-	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+	klog.InitFlags(nil)
+	defer klog.Flush()
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

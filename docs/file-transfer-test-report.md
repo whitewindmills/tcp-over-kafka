@@ -2,7 +2,8 @@
 
 ## Purpose
 
-Use this document to verify that the shared-topic tunnel preserves file contents for SSH `scp` transfers and larger payloads.
+Use this document to verify that the symmetric node tunnel preserves file
+contents for SSH `scp` transfers and larger payloads in both directions.
 
 ## Inputs
 
@@ -14,75 +15,59 @@ source ./hack/.env.local
 set +a
 ```
 
-Build repeated flags and test targets:
+The file-transfer entrypoint is:
 
-```bash
-CLIENT_ROUTE_FLAGS=$(jq -r 'to_entries[] | "--route \(.key)=\(.value)"' <<<"$CLIENT_ROUTES_JSON")
-SERVER_SERVICE_FLAGS=$(jq -r 'to_entries[] | "--service \(.key)=\(.value)"' <<<"$SERVER_SERVICES_JSON")
-SSH_DESTINATION="${SSH_TEST_USER}@${SSH_TEST_HOST}"
-PROXY_COMMAND="./bin/tcp-over-kafka proxy --socks ${SOCKS_PROXY_ADDR} %h %p"
-PAYLOAD_PATH=./payload.bin
-```
+- `./hack/test/file-transfer.sh`
+
+The payload sizes come from `E2E_FILE_SIZES_MB` in `./hack/.env.local`.
 
 ## What To Run
 
-1. Start the tunnel endpoints with the shared topic.
-
-2. Generate a payload.
+1. Deploy the broker and both nodes.
 
 ```bash
-dd if=/dev/urandom of="$PAYLOAD_PATH" bs=1M count=1
+make deploy-all
 ```
 
-3. Copy the payload through the local SOCKS proxy path.
+2. Run the directional file-transfer suite.
 
 ```bash
-scp -o ProxyCommand="${PROXY_COMMAND}" \
-  "$PAYLOAD_PATH" "${SSH_DESTINATION}:${SCP_REMOTE_PATH}"
+make e2e-test-file
 ```
 
-4. Compare checksums on both sides.
+3. If you need a deeper sweep, override the payload sizes for that run.
 
 ```bash
-sha256sum "$PAYLOAD_PATH"
-ssh -o ProxyCommand="${PROXY_COMMAND}" \
-  "$SSH_DESTINATION" sha256sum "$SCP_REMOTE_PATH"
+E2E_FILE_SIZES_MB=1,16,64,256 bash ./hack/test/file-transfer.sh
 ```
-
-5. Sweep larger payload sizes:
-
-- `1 MiB`
-- `4 MiB`
-- `16 MiB`
-- `64 MiB`
-- `256 MiB`
-- `512 MiB`
 
 ## Expected Results
 
-- The upload checksum should match the checksum reported on the destination host.
+- The upload checksum should match the checksum reported on the destination host
+  for every configured size.
+- Transfers should succeed for both `node-a -> node-b` and `node-b -> node-a`.
 - Larger transfers should complete without truncation or corruption.
-- File contents should remain intact even when the proxy is carrying other traffic on the same topic.
+- File contents should remain intact even when the proxy is carrying other
+  traffic on the same topic.
 
 ## Execution History
 
-### 2026-03-25
+### 2026-03-26
 
-| Payload size | Local checksum | Remote checksum | Duration | Notes |
-| --- | --- | --- | --- | --- |
-| `1 MiB` | `163fcaf98ae843c8ed46685be68ab064e10cf89ba58e4913ce8870bd0bc64167` | `163fcaf98ae843c8ed46685be68ab064e10cf89ba58e4913ce8870bd0bc64167` | `2s` | pass |
-| `4 MiB` | `68e80157f1e33d160e6a03c8dbcf4638a194243b782ecfb3ac9a64e45e739aca` | `68e80157f1e33d160e6a03c8dbcf4638a194243b782ecfb3ac9a64e45e739aca` | `3s` | pass |
-| `16 MiB` | `30bd1e4e0ef721775248e9d4078884dfcea24889a2d84778c3d92b54a4a4dc67` | `30bd1e4e0ef721775248e9d4078884dfcea24889a2d84778c3d92b54a4a4dc67` | `4s` | pass |
-| `64 MiB` | `fc84e6edad25c9e4c5535a6cd137025349ce1ce9b74156fb1fda84199c36908c` | `fc84e6edad25c9e4c5535a6cd137025349ce1ce9b74156fb1fda84199c36908c` | `20s` | pass |
-| `256 MiB` | `809ac89c9648bc6f55a03763c11d9839fc9573a93f3900987697b978968b73a7` | `809ac89c9648bc6f55a03763c11d9839fc9573a93f3900987697b978968b73a7` | `70s` | pass |
-| `512 MiB` | `fabca6cb9dc63ea386da66535185968dce2bc66fac4ea4dc404bc30a60a849da` | `fabca6cb9dc63ea386da66535185968dce2bc66fac4ea4dc404bc30a60a849da` | `119s` | pass |
+| Direction | Payload sizes | Result | Notes |
+| --- | --- | --- | --- |
+| `node-a -> node-b` | `1 MiB, 64 MiB` | pass | Executed through `bash ./hack/test/run-all.sh` |
+| `node-b -> node-a` | `1 MiB, 64 MiB` | pass | Executed through `bash ./hack/test/run-all.sh` |
 
 - Environment source: `./hack/.env.local`
-- First failing size: none through `512 MiB`
-- Notes: checksum integrity remained stable through the full sweep
+- First failing size: none
+- Notes: `E2E_FILE_SIZES_MB` was `1,64` for this run and both directional checksum checks succeeded.
 
 ## Troubleshooting
 
-- If the transfer fails before any bytes move, confirm that `CLIENT_ROUTES_JSON` includes the SSH target.
-- If the remote checksum differs, inspect tunnel logs for `KindClose` or `KindError`.
-- If large transfers stall, reduce the payload size and verify that both the broker and the remote target service are healthy.
+- If the transfer fails before any bytes move, confirm that the source node’s
+  `routes` config includes the destination SSH endpoint.
+- If the remote checksum differs, inspect tunnel logs for `KindClose` or
+  `KindError`.
+- If large transfers stall, reduce the payload size and verify that both the
+  broker and the destination `ssh` service are healthy.

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Render kubernetes manifests for the broker, client, and server components.
+# Render kubernetes manifests for the broker and symmetric node components.
 
 set -euo pipefail
 
@@ -9,13 +9,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "${SCRIPT_DIR}/lib.sh"
 
 component="${1:-}"
-[ -n "$component" ] || die "usage: render-kubernetes.sh <broker|client|server|all>"
+[ -n "$component" ] || die "usage: render-kubernetes.sh <broker|node-a|node-b|all>"
 
 load_local_env
 
 namespace="${KUBERNETES_NAMESPACE:-tcp-over-kafka}"
 remote_bin_dir="${REMOTE_BIN_DIR:-/usr/local/bin}"
 remote_binary_path="${remote_bin_dir}/tcp-over-kafka"
+remote_node_config_path="$(node_config_path_for node-a)"
 tunnel_runtime_image="${TUNNEL_RUNTIME_IMAGE:-gcr.io/distroless/static-debian12}"
 hello_https_container_image="${HELLO_HTTPS_CONTAINER_IMAGE:-python:3.12-slim}"
 
@@ -46,7 +47,23 @@ print_optional_node_name() {
 	fi
 }
 
-# render_namespace emits the namespace manifest used by all resources.
+# print_required_node_separation keeps the two host-networked node deployments
+# off the same Kubernetes worker so they do not fight over identical ports.
+print_required_node_separation() {
+	local indent=$1
+	printf "%${indent}saffinity:\n" ""
+	printf "%$((indent + 2))spodAntiAffinity:\n" ""
+	printf "%$((indent + 4))srequiredDuringSchedulingIgnoredDuringExecution:\n" ""
+	printf "%$((indent + 6))s- labelSelector:\n" ""
+	printf "%$((indent + 8))smatchExpressions:\n" ""
+	printf "%$((indent + 10))s- key: app\n" ""
+	printf "%$((indent + 12))soperator: In\n" ""
+	printf "%$((indent + 12))svalues:\n" ""
+	printf "%$((indent + 14))s- tcp-over-kafka-node-a\n" ""
+	printf "%$((indent + 14))s- tcp-over-kafka-node-b\n" ""
+	printf "%$((indent + 6))stopologyKey: kubernetes.io/hostname\n" ""
+}
+
 render_namespace() {
 	cat <<EOF
 apiVersion: v1
@@ -56,7 +73,6 @@ metadata:
 EOF
 }
 
-# render_broker emits a broker deployment with host networking and a hostPath volume.
 render_broker() {
 	local broker_host broker_port node_name
 	broker_host=
@@ -113,71 +129,19 @@ EOF
 EOF
 }
 
-# render_client emits a client deployment that runs the host-installed tunnel binary.
-render_client() {
-	local client_args=()
+render_node() {
+	local node=$1
+	local deployment_name
 	local node_name
-	build_client_args client_args
-	node_name="$(k8s_node_name_for client)"
-
-	cat <<EOF
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: tcp-over-kafka-client
-  namespace: ${namespace}
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: tcp-over-kafka-client
-  template:
-    metadata:
-      labels:
-        app: tcp-over-kafka-client
-    spec:
-      hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet
-EOF
-	print_optional_node_name 6 "$node_name"
-	cat <<EOF
-      containers:
-      - name: client
-        image: ${tunnel_runtime_image}
-        command:
-EOF
-	print_yaml_list 10 "${remote_binary_path}"
-	cat <<EOF
-        args:
-EOF
-	print_yaml_list 10 "${client_args[@]}"
-	cat <<EOF
-        volumeMounts:
-        - name: tunnel-binary
-          mountPath: ${remote_binary_path}
-          readOnly: true
-      volumes:
-      - name: tunnel-binary
-        hostPath:
-          path: ${remote_binary_path}
-          type: File
-EOF
-}
-
-# render_server emits a server deployment with a sidecar HTTPS helper.
-render_server() {
-	local server_args=()
-	local node_name
-	build_server_args server_args
-	node_name="$(k8s_node_name_for server)"
+	deployment_name="tcp-over-kafka-${node}"
+	node_name="$(k8s_node_name_for "$node")"
 
 	cat <<EOF
 ---
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: tcp-over-kafka-hello-script
+  name: ${deployment_name}-hello-script
   namespace: ${namespace}
 data:
   hello_https_server.py: |
@@ -188,25 +152,26 @@ EOF
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: tcp-over-kafka-server
+  name: ${deployment_name}
   namespace: ${namespace}
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: tcp-over-kafka-server
+      app: ${deployment_name}
   template:
     metadata:
       labels:
-        app: tcp-over-kafka-server
+        app: ${deployment_name}
     spec:
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
 EOF
 	print_optional_node_name 6 "$node_name"
+	print_required_node_separation 6
 	cat <<EOF
       containers:
-      - name: server
+      - name: node
         image: ${tunnel_runtime_image}
         command:
 EOF
@@ -214,11 +179,14 @@ EOF
 	cat <<EOF
         args:
 EOF
-	print_yaml_list 10 "${server_args[@]}"
+	print_yaml_list 10 node --config "${remote_node_config_path}"
 	cat <<EOF
         volumeMounts:
         - name: tunnel-binary
           mountPath: ${remote_binary_path}
+          readOnly: true
+        - name: node-config
+          mountPath: ${remote_node_config_path}
           readOnly: true
       - name: hello-world-https
         image: ${hello_https_container_image}
@@ -249,9 +217,13 @@ EOF
         hostPath:
           path: ${remote_binary_path}
           type: File
+      - name: node-config
+        hostPath:
+          path: ${remote_node_config_path}
+          type: File
       - name: hello-script
         configMap:
-          name: tcp-over-kafka-hello-script
+          name: ${deployment_name}-hello-script
       - name: hello-cert
         hostPath:
           path: ${HELLO_HTTPS_CERT}
@@ -263,21 +235,24 @@ EOF
 EOF
 }
 
-render_namespace
 case "$component" in
 broker)
+	render_namespace
 	render_broker
 	;;
-client)
-	render_client
+node-a)
+	render_namespace
+	render_node node-a
 	;;
-server)
-	render_server
+node-b)
+	render_namespace
+	render_node node-b
 	;;
 all)
+	render_namespace
 	render_broker
-	render_client
-	render_server
+	render_node node-a
+	render_node node-b
 	;;
 *)
 	die "unknown component: $component"

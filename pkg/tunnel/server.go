@@ -3,12 +3,15 @@ package tunnel
 import (
 	"context"
 	"fmt"
-	"log"
 	"net"
 	"sync"
 
+	"k8s.io/klog/v2"
+
 	"tcp-over-kafka/pkg/frame"
 )
+
+type dialContextFunc func(context.Context, string, string) (net.Conn, error)
 
 // serverSession tracks one remote TCP connection opened on behalf of a client.
 type serverSession struct {
@@ -32,77 +35,16 @@ func (s *serverSession) close() {
 	}
 }
 
-// RunServer consumes tunnel frames and proxies them to the requested target.
-func RunServer(ctx context.Context, cfg ServerConfig) error {
-	if err := cfg.validate(); err != nil {
-		return err
-	}
-	bus := NewBus(cfg.Broker, cfg.Topic, cfg.ServerGroup)
-	defer bus.Close()
-
-	log.Printf("server consuming topic=%s, broker=%s, platform=%s", cfg.Topic, cfg.Broker, cfg.PlatformID)
-	sessions := newServerRegistry()
-
-	for {
-		f, err := bus.Receive(ctx)
-		if err != nil {
-			if ctx.Err() != nil {
-				return nil
-			}
-			return err
-		}
-		if f.DestinationPlatformID != cfg.PlatformID {
-			continue
-		}
-		switch f.Kind {
-		case frame.KindOpen:
-			if err := serverOpenSession(ctx, bus, sessions, cfg.PlatformID, cfg.Services, cfg.MaxFrameSize, f); err != nil {
-				log.Printf("open session failed: %v", err)
-				_ = bus.Send(context.Background(), frame.Frame{
-					Kind:                  frame.KindError,
-					SourcePlatformID:      cfg.PlatformID,
-					SourceDeviceID:        f.DestinationDeviceID,
-					DestinationPlatformID: f.SourcePlatformID,
-					DestinationDeviceID:   f.SourceDeviceID,
-					ConnectionID:          f.ConnectionID,
-					Err:                   err.Error(),
-				})
-			}
-		case frame.KindReady:
-			if sess := sessions.getFrame(f); sess != nil {
-				sess.startOutbound(ctx, bus, sessions, cfg.MaxFrameSize)
-			}
-		case frame.KindData:
-			if sess := sessions.getFrame(f); sess != nil {
-				if len(f.Payload) > 0 {
-					if err := writeAll(sess.conn, f.Payload); err != nil {
-						log.Printf("server write failed: %v", err)
-						sess.close()
-						sessions.removeFrame(f)
-					}
-				}
-			}
-		case frame.KindClose, frame.KindError:
-			if sess := sessions.getFrame(f); sess != nil {
-				sess.close()
-				sessions.removeFrame(f)
-			}
-		default:
-			log.Printf("unknown frame kind: %d", f.Kind)
-		}
-	}
-}
-
-// serverOpenSession dials the target socket and registers a new server session.
-func serverOpenSession(ctx context.Context, bus tunnelBus, sessions *serverRegistry, platformID string, services map[string]string, maxFrame int, f frame.Frame) error {
+// serverOpenSession dials the registered local target and registers one inbound session.
+func serverOpenSession(ctx context.Context, bus tunnelBus, sessions *serverRegistry, platformID string, services map[string]string, maxFrame int, dialContext dialContextFunc, f frame.Frame) error {
 	if sessions.getFrame(f) != nil {
 		return nil
 	}
 	targetAddr, ok := resolveServerService(services, f.DestinationDeviceID)
 	if !ok {
-		return fmt.Errorf("unknown destination device %q", f.DestinationDeviceID)
+		return fmt.Errorf("unknown destination: %q", f.DestinationDeviceID)
 	}
-	conn, err := net.Dial("tcp", targetAddr)
+	conn, err := dialContext(ctx, "tcp", targetAddr)
 	if err != nil {
 		return fmt.Errorf("dial target %s: %w", targetAddr, err)
 	}
@@ -157,14 +99,14 @@ func serverPumpOutbound(ctx context.Context, bus tunnelBus, sessions *serverRegi
 				ConnectionID:          sess.connectionID,
 				Payload:               payload,
 			}); err != nil {
-				log.Printf("server send failed: %v", err)
+				klog.Errorf("Server send failed: %v", err)
 				sess.close()
 				return
 			}
 		}
 		if err != nil {
 			if !isExpectedStreamClose(err) {
-				log.Printf("target read failed: %v", err)
+				klog.Errorf("Target read failed: %v", err)
 			}
 			_ = bus.Send(context.Background(), frame.Frame{
 				Kind:                  frame.KindClose,

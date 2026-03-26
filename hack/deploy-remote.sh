@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 
-# Deploy the broker, client, and server using systemd, docker, or kubernetes.
-# Each component can pick its own mode via BROKER_DEPLOY_MODE, CLIENT_DEPLOY_MODE,
-# and SERVER_DEPLOY_MODE, while DEPLOY_MODE provides the default.
+# Deploy the broker and symmetric node runtimes using systemd, docker, or kubernetes.
+# Each component can pick its own mode via BROKER_DEPLOY_MODE, NODE_A_DEPLOY_MODE,
+# and NODE_B_DEPLOY_MODE, while DEPLOY_MODE provides the default.
 
 set -euo pipefail
 
@@ -11,7 +11,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "${SCRIPT_DIR}/lib.sh"
 
 component="${1:-}"
-[ -n "$component" ] || die "usage: deploy-remote.sh <broker|client|server|all>"
+[ -n "$component" ] || die "usage: deploy-remote.sh <broker|node-a|node-b|all>"
 
 load_local_env
 
@@ -22,13 +22,32 @@ remote_env_file="${REMOTE_ENV_FILE:-${remote_env_dir}/tcp-over-kafka.env}"
 remote_systemd_dir="${REMOTE_SYSTEMD_DIR:-/etc/systemd/system}"
 remote_binary_path="${remote_bin_dir}/tcp-over-kafka"
 remote_hello_script_path="${remote_bin_dir}/hello_https_server.py"
+remote_node_config_path="$(node_config_path_for node-a)"
 binary_path="${TCP_OVER_KAFKA_BINARY:-${PROJECT_ROOT}/bin/tcp-over-kafka}"
 tunnel_runtime_image="${TUNNEL_RUNTIME_IMAGE:-gcr.io/distroless/static-debian12}"
 hello_https_container_image="${HELLO_HTTPS_CONTAINER_IMAGE:-python:3.12-slim}"
 
-ssh_args=(-o BatchMode=yes)
-if [ -n "${SSH_AUTH:-}" ]; then
-	ssh_args+=(-i "${SSH_AUTH}")
+ssh_cmd=(ssh)
+scp_cmd=(scp)
+ssh_args=()
+if [ -n "${SSH_AUTH:-}" ] && [ -f "${SSH_AUTH}" ]; then
+	ssh_args=(-o BatchMode=yes -i "${SSH_AUTH}")
+elif [ -n "${SSH_PASSWORD:-}" ]; then
+	if [ -n "${SSH_AUTH:-}" ]; then
+		log "ssh identity file not found at ${SSH_AUTH}; falling back to password authentication"
+	fi
+	require_command sshpass
+	export SSHPASS="${SSH_PASSWORD}"
+	ssh_cmd=(sshpass -e ssh)
+	scp_cmd=(sshpass -e scp)
+	ssh_args=(
+		-o BatchMode=no
+		-o NumberOfPasswordPrompts=1
+		-o PreferredAuthentications=password
+		-o PubkeyAuthentication=no
+	)
+else
+	ssh_args=(-o BatchMode=yes)
 fi
 
 # remote_spec returns user@host for an SSH-managed component.
@@ -41,7 +60,7 @@ remote_spec() {
 remote_exec() {
 	local remote=$1
 	local command=$2
-	ssh "${ssh_args[@]}" "$remote" "$command"
+	"${ssh_cmd[@]}" "${ssh_args[@]}" "$remote" "$command"
 }
 
 # copy_remote_file stages a local file to a remote destination with a mode.
@@ -53,7 +72,7 @@ copy_remote_file() {
 	local tmp
 	tmp="/tmp/$(basename "$dst").$$"
 
-	scp "${ssh_args[@]}" "$src" "${remote}:${tmp}"
+	"${scp_cmd[@]}" "${ssh_args[@]}" "$src" "${remote}:${tmp}"
 	remote_exec "$remote" "install -D -m ${mode} '${tmp}' '${dst}' && rm -f '${tmp}'"
 }
 
@@ -66,7 +85,11 @@ prepare_remote_dirs() {
 # install_env_and_lib copies the shared env file and helper library to a host.
 install_env_and_lib() {
 	local remote=$1
-	copy_remote_file "$remote" "${PROJECT_ROOT}/hack/.env.local" "${remote_env_file}" 0644
+	local rendered_env
+	rendered_env="$(mktemp)"
+	TCP_OVER_KAFKA_NODE_CONFIG="${remote_node_config_path}" write_runtime_env_file "${rendered_env}"
+	copy_remote_file "$remote" "${rendered_env}" "${remote_env_file}" 0644
+	rm -f "${rendered_env}"
 	copy_remote_file "$remote" "${SCRIPT_DIR}/lib.sh" "${remote_libexec_dir}/lib.sh" 0644
 }
 
@@ -77,6 +100,17 @@ install_tunnel_binary() {
 	copy_remote_file "$remote" "$binary_path" "${remote_binary_path}" 0755
 }
 
+# install_node_config copies one rendered node JSON config to a host.
+install_node_config() {
+	local remote=$1
+	local node=$2
+	local rendered_config
+	rendered_config="$(mktemp)"
+	write_node_config_file "$node" "${rendered_config}"
+	copy_remote_file "$remote" "${rendered_config}" "${remote_node_config_path}" 0644
+	rm -f "${rendered_config}"
+}
+
 # reload_systemd refreshes units and ensures the requested services are running.
 reload_systemd() {
 	local remote=$1
@@ -84,38 +118,30 @@ reload_systemd() {
 	remote_exec "$remote" "systemctl daemon-reload && systemctl enable --now ${units}"
 }
 
-# build_client_args renders the client CLI args from the env file.
-build_client_args() {
-	local -n out=$1
-	local route_flags=()
-	append_json_flags route_flags --route "${CLIENT_ROUTES_JSON}"
-	out=(
-		client
-		--topic "${KAFKA_TOPIC}"
-		--broker "${BROKER_ADDR}"
-		--group "${CLIENT_GROUP}"
-		--listen "${CLIENT_LISTEN_ADDR}"
-		--platform-id "${CLIENT_PLATFORM_ID}"
-		--device-id "${CLIENT_DEVICE_ID}"
-		--max-frame "${CLIENT_MAX_FRAME_SIZE:-32768}"
-		"${route_flags[@]}"
-	)
+# retire_legacy_node_units disables the old split-role units so only the
+# symmetric node runtime consumes the shared Kafka topic after a node deploy.
+retire_legacy_node_units() {
+	local remote=$1
+	remote_exec "$remote" "systemctl disable --now tcp-over-kafka-client tcp-over-kafka-server >/dev/null 2>&1 || true; systemctl reset-failed tcp-over-kafka-client tcp-over-kafka-server >/dev/null 2>&1 || true"
 }
 
-# build_server_args renders the server CLI args from the env file.
-build_server_args() {
-	local -n out=$1
-	local service_flags=()
-	append_json_flags service_flags --service "${SERVER_SERVICES_JSON}"
-	out=(
-		server
-		--topic "${KAFKA_TOPIC}"
-		--broker "${BROKER_ADDR}"
-		--group "${SERVER_GROUP}"
-		--platform-id "${SERVER_PLATFORM_ID}"
-		--max-frame "${SERVER_MAX_FRAME_SIZE:-32768}"
-		"${service_flags[@]}"
-	)
+# retire_legacy_node_containers removes the old split-role docker workloads so
+# the node runtime can claim the host-network ports and Kafka consumer role.
+retire_legacy_node_containers() {
+	local remote=$1
+	remote_exec "$remote" "docker rm -f tcp-over-kafka-client tcp-over-kafka-server hello-world-https >/dev/null 2>&1 || true"
+}
+
+# retire_legacy_node_kubernetes deletes the old split-role kubernetes resources
+# before the symmetric node deployments are applied.
+retire_legacy_node_kubernetes() {
+	local namespace
+	namespace="${KUBERNETES_NAMESPACE:-tcp-over-kafka}"
+	if ! kubectl get namespace "${namespace}" >/dev/null 2>&1; then
+		return 0
+	fi
+	kubectl --namespace "${namespace}" delete deployment tcp-over-kafka-client tcp-over-kafka-server --ignore-not-found >/dev/null
+	kubectl --namespace "${namespace}" delete configmap tcp-over-kafka-hello-script --ignore-not-found >/dev/null
 }
 
 # deploy_systemd_broker installs and enables the broker unit.
@@ -130,39 +156,47 @@ deploy_systemd_broker() {
 	reload_systemd "$remote" "tcp-over-kafka-broker"
 }
 
-# deploy_systemd_client installs and enables the client unit.
-deploy_systemd_client() {
-	local remote
-	remote="$(remote_spec client)"
-	prepare_remote_dirs "$remote"
-	install_env_and_lib "$remote"
-	install_tunnel_binary "$remote"
-	copy_remote_file "$remote" "${SCRIPT_DIR}/run-client.sh" "${remote_libexec_dir}/run-client.sh" 0755
-	copy_remote_file "$remote" "${PROJECT_ROOT}/deploy/systemd/tcp-over-kafka-client.service" "${remote_systemd_dir}/tcp-over-kafka-client.service" 0644
-	reload_systemd "$remote" "tcp-over-kafka-client"
+# deploy_external_broker validates an existing broker without modifying it.
+deploy_external_broker() {
+	local remote broker_host broker_port
+	remote="$(remote_spec broker)"
+	broker_host=
+	broker_port=
+	split_host_port "${BROKER_ADDR}" broker_host broker_port
+
+	if [ "$broker_host" != "$(remote_host_for broker)" ]; then
+		die "external broker host mismatch: BROKER_ADDR=${BROKER_ADDR}, BROKER_SSH_HOST=$(remote_host_for broker)"
+	fi
+
+	remote_exec "$remote" "systemctl disable --now tcp-over-kafka-broker >/dev/null 2>&1 || true; systemctl reset-failed tcp-over-kafka-broker >/dev/null 2>&1 || true"
+	remote_exec "$remote" "ss -ltn | awk '\$4 ~ /:${broker_port}\$/ && \$1 == \"LISTEN\" { found=1 } END { exit(found ? 0 : 1) }'" \
+		|| die "external broker is not listening on ${BROKER_ADDR}"
+
+	log "broker deploy mode is external; leaving existing broker on ${BROKER_ADDR} unchanged"
 }
 
-# deploy_systemd_server installs and enables the server and HTTPS helper units.
-deploy_systemd_server() {
+# deploy_systemd_node installs and enables the node and HTTPS helper units.
+deploy_systemd_node() {
+	local node=$1
 	local remote
-	remote="$(remote_spec server)"
+	remote="$(remote_spec "$node")"
 	prepare_remote_dirs "$remote"
 	install_env_and_lib "$remote"
 	install_tunnel_binary "$remote"
-	copy_remote_file "$remote" "${SCRIPT_DIR}/run-server.sh" "${remote_libexec_dir}/run-server.sh" 0755
+	install_node_config "$remote" "$node"
+	copy_remote_file "$remote" "${SCRIPT_DIR}/run-node.sh" "${remote_libexec_dir}/run-node.sh" 0755
 	copy_remote_file "$remote" "${SCRIPT_DIR}/run-hello-https.sh" "${remote_libexec_dir}/run-hello-https.sh" 0755
 	copy_remote_file "$remote" "${SCRIPT_DIR}/hello_https_server.py" "${remote_hello_script_path}" 0755
-	copy_remote_file "$remote" "${PROJECT_ROOT}/deploy/systemd/tcp-over-kafka-server.service" "${remote_systemd_dir}/tcp-over-kafka-server.service" 0644
+	copy_remote_file "$remote" "${PROJECT_ROOT}/deploy/systemd/tcp-over-kafka-node.service" "${remote_systemd_dir}/tcp-over-kafka-node.service" 0644
 	copy_remote_file "$remote" "${PROJECT_ROOT}/deploy/systemd/hello-world-https.service" "${remote_systemd_dir}/hello-world-https.service" 0644
-	reload_systemd "$remote" "hello-world-https tcp-over-kafka-server"
+	retire_legacy_node_units "$remote"
+	reload_systemd "$remote" "hello-world-https tcp-over-kafka-node"
 }
 
 # deploy_docker_broker runs the broker as a managed docker container.
 deploy_docker_broker() {
 	local remote broker_host broker_port
 	remote="$(remote_spec broker)"
-	require_command ssh
-	require_command scp
 	prepare_remote_dirs "$remote"
 	broker_host=
 	broker_port=
@@ -185,39 +219,16 @@ deploy_docker_broker() {
 	remote_exec "$remote" "docker rm -f tcp-over-kafka-broker >/dev/null 2>&1 || true; install -d '${BROKER_DATA_DIR}'; $(shell_join "${broker_cmd[@]}")"
 }
 
-# deploy_docker_client runs the client in a docker container with host networking.
-deploy_docker_client() {
+# deploy_docker_node runs the HTTPS helper and node runtime in docker containers.
+deploy_docker_node() {
+	local node=$1
 	local remote
-	local client_args=()
-	remote="$(remote_spec client)"
-	require_command ssh
-	require_command scp
+	remote="$(remote_spec "$node")"
 	prepare_remote_dirs "$remote"
+	install_env_and_lib "$remote"
 	install_tunnel_binary "$remote"
-	build_client_args client_args
-
-	local docker_cmd=(
-		docker run -d --name tcp-over-kafka-client --restart unless-stopped --network host
-		-v "${remote_binary_path}:${remote_binary_path}:ro"
-		"${tunnel_runtime_image}"
-		"${remote_binary_path}"
-		"${client_args[@]}"
-	)
-
-	remote_exec "$remote" "docker rm -f tcp-over-kafka-client >/dev/null 2>&1 || true; $(shell_join "${docker_cmd[@]}")"
-}
-
-# deploy_docker_server runs the HTTPS helper and server relay in docker containers.
-deploy_docker_server() {
-	local remote
-	local server_args=()
-	remote="$(remote_spec server)"
-	require_command ssh
-	require_command scp
-	prepare_remote_dirs "$remote"
-	install_tunnel_binary "$remote"
+	install_node_config "$remote" "$node"
 	copy_remote_file "$remote" "${SCRIPT_DIR}/hello_https_server.py" "${remote_hello_script_path}" 0755
-	build_server_args server_args
 
 	local hello_cmd=(
 		docker run -d --name hello-world-https --restart unless-stopped --network host
@@ -232,15 +243,18 @@ deploy_docker_server() {
 		--key "${HELLO_HTTPS_KEY}"
 	)
 
-	local server_cmd=(
-		docker run -d --name tcp-over-kafka-server --restart unless-stopped --network host
+	local node_cmd=(
+		docker run -d --name tcp-over-kafka-node --restart unless-stopped --network host
 		-v "${remote_binary_path}:${remote_binary_path}:ro"
+		-v "${remote_node_config_path}:${remote_node_config_path}:ro"
 		"${tunnel_runtime_image}"
 		"${remote_binary_path}"
-		"${server_args[@]}"
+		node
+		--config "${remote_node_config_path}"
 	)
 
-	remote_exec "$remote" "docker rm -f hello-world-https tcp-over-kafka-server >/dev/null 2>&1 || true; $(shell_join "${hello_cmd[@]}"); $(shell_join "${server_cmd[@]}")"
+	retire_legacy_node_containers "$remote"
+	remote_exec "$remote" "docker rm -f tcp-over-kafka-node >/dev/null 2>&1 || true; $(shell_join "${hello_cmd[@]}"); $(shell_join "${node_cmd[@]}")"
 }
 
 # deploy_kubernetes_component applies manifests for a component to the active cluster.
@@ -248,16 +262,16 @@ deploy_kubernetes_component() {
 	local target=$1
 	require_command kubectl
 	case "$target" in
-	client|server)
+	node-a|node-b)
 		local remote
 		remote="$(remote_spec "$target")"
-		require_command ssh
-		require_command scp
 		prepare_remote_dirs "$remote"
 		install_tunnel_binary "$remote"
+		install_node_config "$remote" "$target"
+		retire_legacy_node_kubernetes
 		;;
 	esac
-	"${SCRIPT_DIR}/render-kubernetes.sh" "$target" | kubectl apply -f -
+	bash "${SCRIPT_DIR}/render-kubernetes.sh" "$target" | kubectl apply -f -
 }
 
 # deploy_component dispatches to the requested deployment mode.
@@ -267,13 +281,27 @@ deploy_component() {
 	mode="$(deploy_mode_for "$target")"
 	case "$mode" in
 	systemd)
-		"deploy_systemd_${target}"
+		case "$target" in
+		broker) deploy_systemd_broker ;;
+		node-a | node-b) deploy_systemd_node "$target" ;;
+		*) die "unknown component: $target" ;;
+		esac
 		;;
 	docker)
-		"deploy_docker_${target}"
+		case "$target" in
+		broker) deploy_docker_broker ;;
+		node-a | node-b) deploy_docker_node "$target" ;;
+		*) die "unknown component: $target" ;;
+		esac
 		;;
 	kubernetes)
 		deploy_kubernetes_component "$target"
+		;;
+	external)
+		case "$target" in
+		broker) deploy_external_broker ;;
+		*) die "unsupported external deploy mode for ${target}" ;;
+		esac
 		;;
 	*)
 		die "unsupported deploy mode for ${target}: ${mode}"
@@ -285,16 +313,16 @@ case "$component" in
 broker)
 	deploy_component broker
 	;;
-client)
-	deploy_component client
+node-a)
+	deploy_component node-a
 	;;
-server)
-	deploy_component server
+node-b)
+	deploy_component node-b
 	;;
 all)
 	deploy_component broker
-	deploy_component client
-	deploy_component server
+	deploy_component node-a
+	deploy_component node-b
 	;;
 *)
 	die "unknown component: $component"

@@ -1,39 +1,52 @@
 package tunnel
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
-func TestClientConfigValidate(t *testing.T) {
-	t.Parallel()
-
-	cfg := ClientConfig{
-		ListenAddr:   "127.0.0.1:1234",
-		Broker:       "127.0.0.1:9092",
-		Topic:        "tcp-over-kafka",
-		ClientGroup:  "client-group",
-		PlatformID:   "10.0.0.167",
-		DeviceID:     "client-a",
-		Routes:       map[string]Endpoint{"10.0.0.168:22": {PlatformID: "10.0.0.168", DeviceID: "ssh"}},
+func testConfig() Config {
+	return Config{
+		Broker:     "127.0.0.1:9092",
+		Topic:      "tcp-over-kafka",
+		PlatformID: "10.0.0.167",
+		ListenAddr: "127.0.0.1:1234",
+		Routes: map[string]Endpoint{
+			"10.0.0.168:22": {PlatformID: "10.0.0.168", DeviceID: "ssh"},
+		},
+		Services: map[string]string{
+			"ssh": "127.0.0.1:22",
+		},
 		MaxFrameSize: 1024,
 	}
+}
+
+func TestConfigValidate(t *testing.T) {
+	t.Parallel()
+
+	cfg := testConfig()
 	if err := cfg.validate(); err != nil {
 		t.Fatalf("validate() returned error: %v", err)
 	}
 }
 
-func TestClientConfigValidateReportsSpecificFields(t *testing.T) {
+func TestConfigValidateReportsSpecificFields(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name string
-		cfg  ClientConfig
+		cfg  Config
 		want string
 	}{
-		{name: "listen", cfg: ClientConfig{Broker: "b", Topic: "t", ClientGroup: "g", PlatformID: "p", DeviceID: "d", Routes: map[string]Endpoint{"x:1": {PlatformID: "p", DeviceID: "d"}}, MaxFrameSize: 1}, want: "missing client listen address"},
-		{name: "broker", cfg: ClientConfig{ListenAddr: "l", Topic: "t", ClientGroup: "g", PlatformID: "p", DeviceID: "d", Routes: map[string]Endpoint{"x:1": {PlatformID: "p", DeviceID: "d"}}, MaxFrameSize: 1}, want: "missing client broker address"},
-		{name: "topic", cfg: ClientConfig{ListenAddr: "l", Broker: "b", ClientGroup: "g", PlatformID: "p", DeviceID: "d", Routes: map[string]Endpoint{"x:1": {PlatformID: "p", DeviceID: "d"}}, MaxFrameSize: 1}, want: "missing client topic"},
-		{name: "group", cfg: ClientConfig{ListenAddr: "l", Broker: "b", Topic: "t", PlatformID: "p", DeviceID: "d", Routes: map[string]Endpoint{"x:1": {PlatformID: "p", DeviceID: "d"}}, MaxFrameSize: 1}, want: "missing client consumer group"},
-		{name: "routes", cfg: ClientConfig{ListenAddr: "l", Broker: "b", Topic: "t", ClientGroup: "g", PlatformID: "p", DeviceID: "d", MaxFrameSize: 1}, want: "missing client routes"},
-		{name: "frame", cfg: ClientConfig{ListenAddr: "l", Broker: "b", Topic: "t", ClientGroup: "g", PlatformID: "p", DeviceID: "d", Routes: map[string]Endpoint{"x:1": {PlatformID: "p", DeviceID: "d"}}}, want: "max frame size must be positive"},
+		{name: "listen", cfg: Config{Broker: "b", Topic: "t", PlatformID: "p", Routes: map[string]Endpoint{"10.0.0.168:22": {PlatformID: "q", DeviceID: "ssh"}}, Services: map[string]string{"ssh": "127.0.0.1:22"}, MaxFrameSize: 1}, want: "missing node listen address"},
+		{name: "listen invalid", cfg: Config{ListenAddr: "bad", Broker: "b", Topic: "t", PlatformID: "p", Routes: map[string]Endpoint{"10.0.0.168:22": {PlatformID: "q", DeviceID: "ssh"}}, Services: map[string]string{"ssh": "127.0.0.1:22"}, MaxFrameSize: 1}, want: "invalid node listen address \"bad\": address bad: missing port in address"},
+		{name: "broker", cfg: Config{ListenAddr: "127.0.0.1:1", Topic: "t", PlatformID: "p", Routes: map[string]Endpoint{"10.0.0.168:22": {PlatformID: "q", DeviceID: "ssh"}}, Services: map[string]string{"ssh": "127.0.0.1:22"}, MaxFrameSize: 1}, want: "missing node broker address"},
+		{name: "topic", cfg: Config{ListenAddr: "127.0.0.1:1", Broker: "b", PlatformID: "p", Routes: map[string]Endpoint{"10.0.0.168:22": {PlatformID: "q", DeviceID: "ssh"}}, Services: map[string]string{"ssh": "127.0.0.1:22"}, MaxFrameSize: 1}, want: "missing node topic"},
+		{name: "platform", cfg: Config{ListenAddr: "127.0.0.1:1", Broker: "b", Topic: "t", Routes: map[string]Endpoint{"10.0.0.168:22": {PlatformID: "q", DeviceID: "ssh"}}, Services: map[string]string{"ssh": "127.0.0.1:22"}, MaxFrameSize: 1}, want: "missing node platform ID"},
+		{name: "routes", cfg: Config{ListenAddr: "127.0.0.1:1", Broker: "b", Topic: "t", PlatformID: "p", Services: map[string]string{"ssh": "127.0.0.1:22"}, MaxFrameSize: 1}, want: "missing node routes"},
+		{name: "services", cfg: Config{ListenAddr: "127.0.0.1:1", Broker: "b", Topic: "t", PlatformID: "p", Routes: map[string]Endpoint{"10.0.0.168:22": {PlatformID: "q", DeviceID: "ssh"}}, MaxFrameSize: 1}, want: "missing node service mappings"},
+		{name: "frame", cfg: Config{ListenAddr: "127.0.0.1:1", Broker: "b", Topic: "t", PlatformID: "p", Routes: map[string]Endpoint{"10.0.0.168:22": {PlatformID: "q", DeviceID: "ssh"}}, Services: map[string]string{"ssh": "127.0.0.1:22"}}, want: "max frame size must be positive"},
 	}
 
 	for _, tt := range tests {
@@ -45,27 +58,41 @@ func TestClientConfigValidateReportsSpecificFields(t *testing.T) {
 	}
 }
 
-func TestServerConfigValidateReportsSpecificFields(t *testing.T) {
+func TestLoadConfigAppliesDefaults(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name string
-		cfg  ServerConfig
-		want string
-	}{
-		{name: "broker", cfg: ServerConfig{Topic: "t", ServerGroup: "g", PlatformID: "p", Services: map[string]string{"ssh": "127.0.0.1:22"}, MaxFrameSize: 1}, want: "missing server broker address"},
-		{name: "topic", cfg: ServerConfig{Broker: "b", ServerGroup: "g", PlatformID: "p", Services: map[string]string{"ssh": "127.0.0.1:22"}, MaxFrameSize: 1}, want: "missing server topic"},
-		{name: "group", cfg: ServerConfig{Broker: "b", Topic: "t", PlatformID: "p", Services: map[string]string{"ssh": "127.0.0.1:22"}, MaxFrameSize: 1}, want: "missing server consumer group"},
-		{name: "platform", cfg: ServerConfig{Broker: "b", Topic: "t", ServerGroup: "g", Services: map[string]string{"ssh": "127.0.0.1:22"}, MaxFrameSize: 1}, want: "missing server platform ID"},
-		{name: "services", cfg: ServerConfig{Broker: "b", Topic: "t", ServerGroup: "g", PlatformID: "p", MaxFrameSize: 1}, want: "missing server service mappings"},
-		{name: "frame", cfg: ServerConfig{Broker: "b", Topic: "t", ServerGroup: "g", PlatformID: "p", Services: map[string]string{"ssh": "127.0.0.1:22"}}, want: "max frame size must be positive"},
+	dir := t.TempDir()
+	path := filepath.Join(dir, "node.json")
+	raw := []byte(`{
+  "broker": "10.0.0.166:9092",
+  "topic": "tcp-over-kafka",
+  "platformID": "10.0.0.167",
+  "listen": "127.0.0.1:1234",
+  "routes": {
+    "10.0.0.168:22": {
+      "platformID": "10.0.0.168",
+      "deviceID": "ssh"
+    }
+  },
+  "services": {
+    "ssh": "127.0.0.1:22"
+  }
+}`)
+	if err := os.WriteFile(path, raw, 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if err := tt.cfg.validate(); err == nil || err.Error() != tt.want {
-				t.Fatalf("validate() error = %v, want %q", err, tt.want)
-			}
-		})
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	if cfg.MaxFrameSize != DefaultMaxFrameSize {
+		t.Fatalf("MaxFrameSize = %d, want %d", cfg.MaxFrameSize, DefaultMaxFrameSize)
+	}
+	if got := cfg.ConsumerGroup(); got != "tcp-over-kafka.node.10.0.0.167" {
+		t.Fatalf("ConsumerGroup() = %q", got)
+	}
+	if got := cfg.ProxyEndpoint(); got != (Endpoint{PlatformID: "10.0.0.167", DeviceID: proxyDeviceID}) {
+		t.Fatalf("ProxyEndpoint() = %#v", got)
 	}
 }

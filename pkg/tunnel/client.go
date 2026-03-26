@@ -6,10 +6,11 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
-	"log"
 	"net"
 	"sync"
 	"time"
+
+	"k8s.io/klog/v2"
 
 	"tcp-over-kafka/pkg/frame"
 	"tcp-over-kafka/pkg/socks5"
@@ -55,44 +56,6 @@ func (s *clientSession) frame(kind frame.Kind) frame.Frame {
 	}
 }
 
-// RunClient starts the SOCKS5 listener that fronts the Kafka tunnel.
-func RunClient(ctx context.Context, cfg ClientConfig) error {
-	if err := cfg.validate(); err != nil {
-		return err
-	}
-	bus := NewBus(cfg.Broker, cfg.Topic, cfg.ClientGroup)
-	defer bus.Close()
-
-	ln, err := net.Listen("tcp", cfg.ListenAddr)
-	if err != nil {
-		return err
-	}
-	defer ln.Close()
-	go func() {
-		<-ctx.Done()
-		_ = ln.Close()
-	}()
-
-	self := Endpoint{PlatformID: cfg.PlatformID, DeviceID: cfg.DeviceID}
-	log.Printf("client listening on %s, topic=%s, broker=%s, identity=%s", cfg.ListenAddr, cfg.Topic, cfg.Broker, self.key())
-
-	sessions := newClientRegistry()
-	go clientReceiveLoop(ctx, bus, sessions, self)
-
-	for {
-		conn, err := ln.Accept()
-		if err != nil {
-			select {
-			case <-ctx.Done():
-				return nil
-			default:
-			}
-			return err
-		}
-		go handleClientConn(ctx, bus, sessions, conn, cfg)
-	}
-}
-
 // clientPumpOutbound streams local bytes into Kafka after the session is ready.
 func clientPumpOutbound(ctx context.Context, bus tunnelBus, sessions *clientRegistry, s *clientSession, maxFrame int) {
 	defer sessions.remove(s.self, s.peer, s.connectionID)
@@ -106,15 +69,15 @@ func clientPumpOutbound(ctx context.Context, bus tunnelBus, sessions *clientRegi
 	case <-ctx.Done():
 		wait.Stop()
 		if err := s.onRemoteClose(); err != nil {
-			log.Printf("client shutdown reply failed: %v", err)
+			klog.Errorf("Client shutdown reply failed: %v", err)
 		}
 		_ = bus.Send(context.Background(), s.frame(frame.KindClose))
 		s.close()
 		return
 	case <-wait.C:
-		log.Printf("session %s did not open in time", conversationKey(s.self, s.peer, s.connectionID))
+		klog.Warningf("Session %s did not open in time", conversationKey(s.self, s.peer, s.connectionID))
 		if err := s.onRemoteClose(); err != nil {
-			log.Printf("client timeout reply failed: %v", err)
+			klog.Errorf("Client timeout reply failed: %v", err)
 		}
 		_ = bus.Send(context.Background(), s.frame(frame.KindClose))
 		s.close()
@@ -130,7 +93,7 @@ func clientPumpOutbound(ctx context.Context, bus tunnelBus, sessions *clientRegi
 			msg := s.frame(frame.KindData)
 			msg.Payload = payload
 			if err := bus.Send(ctx, msg); err != nil {
-				log.Printf("send data failed: %v", err)
+				klog.Errorf("Send data failed: %v", err)
 				_ = bus.Send(context.Background(), s.frame(frame.KindClose))
 				s.close()
 				return
@@ -138,7 +101,7 @@ func clientPumpOutbound(ctx context.Context, bus tunnelBus, sessions *clientRegi
 		}
 		if err != nil {
 			if !isExpectedStreamClose(err) {
-				log.Printf("local read failed: %v", err)
+				klog.Errorf("Local read failed: %v", err)
 			}
 			_ = bus.Send(context.Background(), s.frame(frame.KindClose))
 			s.close()
@@ -147,57 +110,11 @@ func clientPumpOutbound(ctx context.Context, bus tunnelBus, sessions *clientRegi
 	}
 }
 
-// clientReceiveLoop applies inbound control/data frames to active client sessions.
-func clientReceiveLoop(ctx context.Context, bus tunnelBus, sessions *clientRegistry, self Endpoint) {
-	for {
-		f, err := bus.Receive(ctx)
-		if err != nil {
-			if ctx.Err() != nil {
-				return
-			}
-			log.Printf("client receive loop ended: %v", err)
-			return
-		}
-		if !self.matches(f.DestinationPlatformID, f.DestinationDeviceID) {
-			continue
-		}
-		s := sessions.getFrame(f)
-		if s == nil {
-			continue
-		}
-		switch f.Kind {
-		case frame.KindOpenAck:
-			if err := s.onOpenAck(ctx, bus); err != nil {
-				log.Printf("client open-ack handling failed: %v", err)
-				s.close()
-				sessions.removeFrame(f)
-			}
-		case frame.KindData:
-			if len(f.Payload) > 0 {
-				if err := writeAll(s.conn, f.Payload); err != nil {
-					log.Printf("client write failed: %v", err)
-					s.close()
-					sessions.removeFrame(f)
-				}
-			}
-		case frame.KindClose, frame.KindError:
-			if f.Err != "" {
-				log.Printf("remote error for %s: %s", frameConversationKey(f), f.Err)
-			}
-			if err := s.onRemoteClose(); err != nil {
-				log.Printf("client close reply failed: %v", err)
-			}
-			s.close()
-			sessions.removeFrame(f)
-		}
-	}
-}
-
-// handleClientConn accepts the SOCKS5 CONNECT request and opens a tunnel session.
-func handleClientConn(ctx context.Context, bus tunnelBus, sessions *clientRegistry, conn net.Conn, cfg ClientConfig) {
+// handleClientConn accepts the SOCKS5 CONNECT request and opens an outbound tunnel session.
+func handleClientConn(ctx context.Context, bus tunnelBus, sessions *clientRegistry, conn net.Conn, self Endpoint, routes map[string]Endpoint, maxFrameSize int) {
 	targetAddr, err := socks5.Accept(conn)
 	if err != nil {
-		log.Printf("socks5 handshake failed: %v", err)
+		klog.Errorf("SOCKS5 handshake failed: %v", err)
 		var reqErr *socks5.RequestError
 		if errors.As(err, &reqErr) {
 			_ = socks5.WriteReply(conn, reqErr.ReplyCode())
@@ -206,16 +123,16 @@ func handleClientConn(ctx context.Context, bus tunnelBus, sessions *clientRegist
 		return
 	}
 
-	dest, ok := resolveClientRoute(cfg.Routes, targetAddr)
+	dest, ok := resolveClientRoute(routes, targetAddr)
 	if !ok {
-		log.Printf("route miss for target %s", targetAddr)
+		klog.Warningf("Route miss for target %s", targetAddr)
 		_ = socks5.WriteReply(conn, socks5.ReplyGeneralFailure)
 		_ = conn.Close()
 		return
 	}
 
 	s := &clientSession{
-		self:   Endpoint{PlatformID: cfg.PlatformID, DeviceID: cfg.DeviceID},
+		self:   self,
 		peer:   dest,
 		conn:   conn,
 		ready:  make(chan struct{}),
@@ -223,7 +140,7 @@ func handleClientConn(ctx context.Context, bus tunnelBus, sessions *clientRegist
 	}
 	connectionID, err := randomID()
 	if err != nil {
-		log.Printf("connection ID generation failed: %v", err)
+		klog.Errorf("Connection ID generation failed: %v", err)
 		_ = socks5.WriteReply(conn, socks5.ReplyGeneralFailure)
 		_ = conn.Close()
 		return
@@ -232,13 +149,13 @@ func handleClientConn(ctx context.Context, bus tunnelBus, sessions *clientRegist
 	sessions.add(s)
 	openFrame := s.frame(frame.KindOpen)
 	if err := bus.Send(ctx, openFrame); err != nil {
-		log.Printf("open send failed: %v", err)
+		klog.Errorf("Open send failed: %v", err)
 		_ = socks5.WriteReply(conn, socks5.ReplyGeneralFailure)
 		s.close()
 		sessions.remove(s.self, s.peer, s.connectionID)
 		return
 	}
-	go clientPumpOutbound(ctx, bus, sessions, s, cfg.MaxFrameSize)
+	go clientPumpOutbound(ctx, bus, sessions, s, maxFrameSize)
 }
 
 // onOpenAck sends the SOCKS5 success reply and then marks the session ready.

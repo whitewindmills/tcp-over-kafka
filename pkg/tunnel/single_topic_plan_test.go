@@ -1,11 +1,12 @@
 package tunnel
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"net"
-	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -30,21 +31,22 @@ func loadProjectEnv(tb testing.TB) map[string]string {
 	tb.Helper()
 
 	path := filepath.Join(testRepoRoot(tb), "hack", ".env.local")
-	raw, err := os.ReadFile(path)
+	cmd := exec.Command("bash", "-lc", fmt.Sprintf("set -a; source %q; set +a; env -0", path))
+	raw, err := cmd.Output()
 	if err != nil {
-		tb.Fatalf("read %s: %v", path, err)
+		tb.Fatalf("source %s: %v", path, err)
 	}
 
 	env := make(map[string]string)
-	for _, line := range strings.Split(string(raw), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
+	for _, entry := range bytes.Split(raw, []byte{0}) {
+		line := strings.TrimSpace(string(entry))
+		if line == "" {
 			continue
 		}
 		if i := strings.Index(line, "="); i >= 0 {
 			key := strings.TrimSpace(line[:i])
 			val := strings.TrimSpace(line[i+1:])
-			env[key] = strings.Trim(val, `"'`)
+			env[key] = val
 		}
 	}
 	return env
@@ -287,11 +289,20 @@ func TestServerOpenSessionReturnsKindErrorForUnknownService(t *testing.T) {
 	defer cancel()
 
 	clientBus, serverBus := newTestBusPair()
+	clientSessions := newClientRegistry()
 	serverSessions := newServerRegistry()
 
 	done := make(chan error, 1)
 	go func() {
-		done <- runTestServerLoop(ctx, serverBus, serverSessions, "10.0.0.168", map[string]string{}, 128)
+		done <- nodeReceiveLoop(ctx, serverBus, clientSessions, serverSessions, Config{
+			Broker:       "127.0.0.1:9092",
+			Topic:        "tcp-over-kafka",
+			PlatformID:   "10.0.0.168",
+			ListenAddr:   "127.0.0.1:12345",
+			Routes:       map[string]Endpoint{"10.0.0.167:22": {PlatformID: "10.0.0.167", DeviceID: "ssh"}},
+			Services:     map[string]string{},
+			MaxFrameSize: 128,
+		}, dialerForHandlers(map[string]pipeHandler{}))
 	}()
 
 	err := clientBus.Send(ctx, frame.Frame{
@@ -312,6 +323,9 @@ func TestServerOpenSessionReturnsKindErrorForUnknownService(t *testing.T) {
 	}
 	if reply.Kind != frame.KindError {
 		t.Fatalf("expected kind error, got %v", reply.Kind)
+	}
+	if reply.Err != `unknown destination: "missing-service"` {
+		t.Fatalf("unexpected error text: %q", reply.Err)
 	}
 	cancel()
 	select {
