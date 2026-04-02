@@ -6,15 +6,26 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=hack/test/lib.sh
 . "${SCRIPT_DIR}/lib.sh"
 
-assert_node_ready node-a
-assert_node_ready node-b
+maybe_run_in_kubernetes_runner "$(basename "$0")"
 
-log "https check node-a -> node-b"
-body_a_to_b="$(https_probe node-a node-b)"
-[ "${body_a_to_b}" = "hello world" ] || die "unexpected https body from node-b: ${body_a_to_b}"
+run_https_check() {
+	local source_node=$1
+	local target_node=$2
+	local body
 
-log "https check node-b -> node-a"
-body_b_to_a="$(https_probe node-b node-a)"
-[ "${body_b_to_a}" = "hello world" ] || die "unexpected https body from node-a: ${body_b_to_a}"
+	log "https check ${source_node} -> ${target_node}"
+	body="$(https_probe "${source_node}" "${target_node}")"
+	[ "${body}" = "hello world" ] || die "unexpected https body from ${target_node}: ${body}"
+}
+
+if directional_e2e_mode; then
+	assert_node_ready "${E2E_LOCAL_NODE}"
+	run_https_check "${E2E_LOCAL_NODE}" "${E2E_REMOTE_NODE}"
+else
+	assert_node_ready node-a
+	assert_node_ready node-b
+	run_https_check node-a node-b
+	run_https_check node-b node-a
+fi
 
 log "https tests passed"

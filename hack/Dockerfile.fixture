@@ -1,0 +1,30 @@
+FROM golang:1.23-bookworm AS build
+WORKDIR /src
+COPY go.mod ./
+COPY go.sum ./
+COPY vendor ./vendor
+COPY cmd ./cmd
+COPY pkg ./pkg
+ARG VERSION=dev
+RUN CGO_ENABLED=0 go build -mod=vendor -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/tcp-over-kafka ./cmd/tcp-over-kafka
+
+FROM debian:bookworm-slim
+RUN apt-get update && \
+	apt-get install -y --no-install-recommends \
+		bash \
+		ca-certificates \
+		coreutils \
+		curl \
+		openssh-client \
+		openssh-server \
+		procps \
+		tar \
+		python3 && \
+	rm -rf /var/lib/apt/lists/* && \
+	mkdir -p /etc/ssh/sshd_config.d /opt/tcp-over-kafka /root/.ssh /var/run/sshd
+COPY --from=build /out/tcp-over-kafka /usr/local/bin/tcp-over-kafka
+COPY hack/hello_https_server.py /opt/tcp-over-kafka/hello_https_server.py
+COPY hack/fixture-entrypoint.sh /usr/local/bin/tcp-over-kafka-fixture
+RUN chmod 0755 /usr/local/bin/tcp-over-kafka /usr/local/bin/tcp-over-kafka-fixture && \
+	chmod 0700 /root/.ssh
+ENTRYPOINT ["/usr/local/bin/tcp-over-kafka-fixture"]

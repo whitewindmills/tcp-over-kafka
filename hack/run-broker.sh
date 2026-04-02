@@ -11,8 +11,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 load_runtime_env
 
 runtime="${BROKER_RUNTIME:-docker}"
-image="${BROKER_IMAGE:-docker.redpanda.com/redpandadata/redpanda:v25.1.6}"
-data_dir="${BROKER_DATA_DIR:-/var/lib/redpanda}"
+image="$(broker_systemd_image)"
+data_dir="$(broker_data_dir_for_mode systemd)"
 rpc_port="${BROKER_RPC_PORT:-33145}"
 
 require_command "$runtime"

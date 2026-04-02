@@ -1,0 +1,40 @@
+- generic [active] [ref=e1]:
+  - img:
+    - generic "Android"
+    - generic "Mac"
+    - generic "Win"
+    - generic "编组 9"
+  - generic [ref=e4]:
+    - generic [ref=e6]:
+      - generic [ref=e7]:
+        - img [ref=e9]
+        - img [ref=e11]
+      - generic [ref=e12]:
+        - generic [ref=e13]: 用户中心
+        - generic [ref=e14] [cursor=pointer]:
+          - generic [ref=e16]: 账号登录
+          - img [ref=e17]
+        - iframe [ref=e21]:
+          
+        - generic [ref=e22] [cursor=pointer]:
+          - generic [ref=e23]: "鲸妙下载:"
+          - generic [ref=e24]:
+            - text: 
+            - generic [ref=e25]:
+              - img [ref=e26]
+              - text: Android|
+          - generic [ref=e28]:
+            - text: 
+            - generic [ref=e29]:
+              - img [ref=e30]
+              - text: iPhone/iPad|
+          - link "Mac|" [ref=e33]:
+            - /url: https://pub.cestc.cn:7086/download#qzgKSsZiOIRV
+            - img [ref=e34]
+            - text: Mac|
+          - link "Win" [ref=e37]:
+            - /url: https://pub.cestc.cn:7086/download#qzgKSsZiOIRV
+            - img [ref=e38]
+            - text: Win
+        - generic [ref=e40]: 本平台为互联网非涉密平台，严禁处理、传输国家秘密
+    - text: 

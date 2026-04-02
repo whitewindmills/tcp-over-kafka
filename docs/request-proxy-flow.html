@@ -1,0 +1,2096 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>tcp-over-kafka request walkthrough</title>
+  <link rel="icon" href="data:,">
+  <meta
+    name="description"
+    content="Visual walkthrough of how tcp-over-kafka proxies a request from one node to a peer through Kafka."
+  >
+  <style>
+    :root {
+      --bg: #eee4d6;
+      --bg-deep: #d8ccbc;
+      --surface: rgba(20, 24, 28, 0.9);
+      --surface-soft: rgba(34, 40, 46, 0.7);
+      --ink: #161514;
+      --ink-soft: rgba(22, 21, 20, 0.72);
+      --paper: #f8f2e9;
+      --line: rgba(22, 21, 20, 0.12);
+      --line-strong: rgba(22, 21, 20, 0.24);
+      --accent: #c45a37;
+      --accent-soft: rgba(196, 90, 55, 0.14);
+      --signal: #ffb36a;
+      --topic: #3f4e60;
+      --node: #0f1720;
+      --sans: "Avenir Next", "Segoe UI", "Helvetica Neue", Helvetica, sans-serif;
+      --serif: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif;
+      --mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+      --shell: min(1180px, calc(100vw - 2.4rem));
+      --section-gap: clamp(5rem, 10vw, 9rem);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      margin: 0;
+      color: var(--ink);
+      font-family: var(--sans);
+      background:
+        radial-gradient(circle at top left, rgba(255, 255, 255, 0.6), transparent 36%),
+        radial-gradient(circle at 90% 15%, rgba(196, 90, 55, 0.15), transparent 28%),
+        linear-gradient(180deg, var(--bg) 0%, #efe6d9 52%, #eadfce 100%);
+      line-height: 1.5;
+      overflow-x: hidden;
+    }
+
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      background-image:
+        linear-gradient(rgba(22, 21, 20, 0.03) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(22, 21, 20, 0.03) 1px, transparent 1px);
+      background-size: 28px 28px;
+      mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.34), transparent 82%);
+      z-index: 0;
+    }
+
+    img {
+      display: block;
+      max-width: 100%;
+    }
+
+    a {
+      color: inherit;
+      text-decoration: none;
+    }
+
+    code,
+    pre {
+      font-family: var(--mono);
+    }
+
+    .shell {
+      width: var(--shell);
+      margin: 0 auto;
+      position: relative;
+      z-index: 1;
+    }
+
+    .topbar {
+      position: absolute;
+      inset: 0 0 auto 0;
+      z-index: 3;
+      padding-top: 1.2rem;
+    }
+
+    .topbar-row {
+      width: var(--shell);
+      margin: 0 auto;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+      min-height: 3rem;
+    }
+
+    .brand {
+      font-size: 0.84rem;
+      text-transform: uppercase;
+      letter-spacing: 0.18em;
+      color: rgba(22, 21, 20, 0.74);
+    }
+
+    .topnav {
+      display: flex;
+      gap: 1.2rem;
+      font-size: 0.92rem;
+      color: rgba(22, 21, 20, 0.72);
+    }
+
+    .topnav a:hover,
+    .source-row:hover .source-link,
+    .button:hover {
+      color: var(--accent);
+    }
+
+    .hero {
+      position: relative;
+      min-height: 100svh;
+      padding: 5.8rem 0 3rem;
+      display: grid;
+      align-items: center;
+    }
+
+    .hero::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.24), transparent 25%),
+        linear-gradient(180deg, transparent 0%, rgba(20, 24, 28, 0.08) 100%);
+      pointer-events: none;
+    }
+
+    .hero-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 29rem) minmax(0, 1fr);
+      gap: clamp(2.4rem, 5vw, 5rem);
+      align-items: center;
+    }
+
+    .eyebrow {
+      margin: 0 0 1rem;
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.22em;
+      color: rgba(22, 21, 20, 0.58);
+    }
+
+    .brandmark {
+      margin: 0;
+      font-family: var(--serif);
+      font-size: clamp(3.7rem, 11vw, 7.3rem);
+      line-height: 0.9;
+      letter-spacing: -0.05em;
+    }
+
+    .headline {
+      max-width: 15ch;
+      margin: 1.3rem 0 1.1rem;
+      font-size: clamp(1.55rem, 2.6vw, 2.55rem);
+      line-height: 1.02;
+      letter-spacing: -0.04em;
+    }
+
+    .intro {
+      max-width: 36rem;
+      margin: 0;
+      font-size: 1.02rem;
+      color: var(--ink-soft);
+    }
+
+    .hero-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.9rem 1.3rem;
+      margin-top: 1.4rem;
+      font-size: 0.9rem;
+      color: rgba(22, 21, 20, 0.68);
+    }
+
+    .hero-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.9rem;
+      margin-top: 1.8rem;
+    }
+
+    .button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 2.9rem;
+      padding: 0 1.15rem;
+      border: 1px solid rgba(22, 21, 20, 0.16);
+      border-radius: 999px;
+      font-size: 0.94rem;
+      color: rgba(22, 21, 20, 0.88);
+      background: rgba(255, 255, 255, 0.34);
+      backdrop-filter: blur(8px);
+      transition: color 160ms ease, border-color 160ms ease, transform 160ms ease;
+    }
+
+    .button:hover {
+      transform: translateY(-1px);
+      border-color: rgba(196, 90, 55, 0.4);
+    }
+
+    .button.primary {
+      background: rgba(20, 24, 28, 0.92);
+      color: #f7efe2;
+      border-color: transparent;
+    }
+
+    .button.primary:hover {
+      color: #fff1df;
+    }
+
+    .hero-visual {
+      position: relative;
+      min-height: 31rem;
+      padding-bottom: 1rem;
+    }
+
+    .flow-plane {
+      position: relative;
+      height: 100%;
+      min-height: 28rem;
+      border-radius: 2rem;
+      overflow: hidden;
+      background:
+        radial-gradient(circle at 12% 20%, rgba(255, 255, 255, 0.08), transparent 24%),
+        radial-gradient(circle at 82% 14%, rgba(196, 90, 55, 0.22), transparent 24%),
+        linear-gradient(135deg, rgba(17, 23, 29, 0.98), rgba(33, 42, 50, 0.9) 58%, rgba(14, 18, 22, 0.98));
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      box-shadow: 0 34px 90px rgba(16, 19, 24, 0.18);
+      padding: 1.3rem;
+    }
+
+    .flow-plane::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background:
+        linear-gradient(90deg, rgba(255, 255, 255, 0.06) 1px, transparent 1px),
+        linear-gradient(rgba(255, 255, 255, 0.05) 1px, transparent 1px);
+      background-size: 64px 64px;
+      opacity: 0.24;
+      pointer-events: none;
+    }
+
+    .plane-topline,
+    .plane-footline {
+      position: relative;
+      z-index: 1;
+      display: flex;
+      justify-content: space-between;
+      gap: 1rem;
+      color: rgba(247, 239, 226, 0.72);
+      font-size: 0.81rem;
+      letter-spacing: 0.03em;
+    }
+
+    .plane-topline strong,
+    .plane-footline strong {
+      color: #fff6ea;
+      font-weight: 600;
+    }
+
+    .plane-network {
+      position: relative;
+      margin-top: 1.3rem;
+      display: grid;
+      gap: 1rem;
+    }
+
+    .plane-stations,
+    .figure-node-row {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 0.7rem;
+      align-items: center;
+    }
+
+    .station,
+    .figure-node {
+      position: relative;
+      z-index: 1;
+      text-align: center;
+      color: rgba(247, 239, 226, 0.8);
+      transition: transform 220ms ease, opacity 220ms ease, color 220ms ease;
+    }
+
+    .station::before,
+    .figure-node::before {
+      content: "";
+      display: block;
+      width: clamp(3.1rem, 7vw, 4.4rem);
+      height: clamp(3.1rem, 7vw, 4.4rem);
+      margin: 0 auto 0.9rem;
+      border-radius: 1.2rem;
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.02)),
+        rgba(17, 23, 29, 0.92);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+    }
+
+    .station.topic::before,
+    .figure-node.topic::before {
+      background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.02)),
+        var(--topic);
+    }
+
+    .station.service::before,
+    .figure-node.service::before {
+      background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.02)),
+        rgba(19, 35, 26, 0.96);
+    }
+
+    .station strong,
+    .figure-node strong {
+      display: block;
+      font-size: 0.96rem;
+      font-weight: 600;
+      color: #fff4e7;
+    }
+
+    .station span,
+    .figure-node span {
+      display: block;
+      font-size: 0.78rem;
+      color: rgba(247, 239, 226, 0.62);
+    }
+
+    .station small,
+    .figure-node small {
+      display: block;
+      margin-top: 0.35rem;
+      font-size: 0.7rem;
+      color: rgba(247, 239, 226, 0.5);
+      letter-spacing: 0.03em;
+    }
+
+    .trajectory-stack {
+      display: grid;
+      gap: 0.8rem;
+    }
+
+    .trajectory-row {
+      display: grid;
+      grid-template-columns: 8rem minmax(0, 1fr);
+      gap: 0.85rem;
+      align-items: start;
+    }
+
+    .trajectory-label {
+      padding-top: 0.72rem;
+      font-size: 0.68rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.14em;
+      color: rgba(247, 239, 226, 0.52);
+    }
+
+    .trajectory-body {
+      display: grid;
+      gap: 0.4rem;
+    }
+
+    .trajectory-path {
+      position: relative;
+      min-height: 2.6rem;
+      border-radius: 999px;
+      background-image:
+        linear-gradient(90deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.08)),
+        radial-gradient(circle at 0% 50%, rgba(255, 255, 255, 0.18) 0 4px, transparent 4.5px),
+        radial-gradient(circle at 25% 50%, rgba(255, 255, 255, 0.18) 0 4px, transparent 4.5px),
+        radial-gradient(circle at 50% 50%, rgba(255, 255, 255, 0.18) 0 4px, transparent 4.5px),
+        radial-gradient(circle at 75% 50%, rgba(255, 255, 255, 0.18) 0 4px, transparent 4.5px),
+        radial-gradient(circle at 100% 50%, rgba(255, 255, 255, 0.18) 0 4px, transparent 4.5px);
+      background-repeat: no-repeat;
+      background-size: 100% 1px, auto, auto, auto, auto, auto;
+      background-position: center, center, center, center, center, center;
+      --span-start: 0%;
+      --span-end: 100%;
+      --packet-start: 0%;
+      --packet-end: 100%;
+      --rail-color: rgba(255, 255, 255, 0.34);
+      --packet-surface: linear-gradient(180deg, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.06));
+      --packet-ink: #fff4e7;
+      --packet-glow: rgba(255, 255, 255, 0.12);
+      --duration: 7.4s;
+      z-index: 2;
+    }
+
+    .trajectory-path::after {
+      content: "";
+      position: absolute;
+      top: 50%;
+      left: var(--span-start);
+      width: calc(var(--span-end) - var(--span-start));
+      height: 2px;
+      border-radius: 999px;
+      background: linear-gradient(90deg, rgba(255, 255, 255, 0.06), var(--rail-color), rgba(255, 255, 255, 0.06));
+      transform: translateY(-50%);
+      box-shadow: 0 0 18px rgba(0, 0, 0, 0.12);
+    }
+
+    .trajectory-path.local {
+      --rail-color: rgba(255, 255, 255, 0.6);
+      --packet-surface: linear-gradient(180deg, rgba(255, 255, 255, 0.18), rgba(255, 255, 255, 0.08));
+      --packet-glow: rgba(255, 255, 255, 0.12);
+    }
+
+    .trajectory-path.open {
+      --rail-color: rgba(255, 179, 106, 0.9);
+      --packet-surface: linear-gradient(180deg, rgba(255, 201, 132, 0.92), rgba(213, 130, 72, 0.9));
+      --packet-ink: #2b1308;
+      --packet-glow: rgba(255, 179, 106, 0.18);
+    }
+
+    .trajectory-path.service-local {
+      --rail-color: rgba(132, 214, 156, 0.84);
+      --packet-surface: linear-gradient(180deg, rgba(88, 152, 109, 0.96), rgba(45, 88, 59, 0.96));
+      --packet-ink: #effcef;
+      --packet-glow: rgba(132, 214, 156, 0.14);
+    }
+
+    .trajectory-path.ack {
+      --rail-color: rgba(186, 211, 255, 0.86);
+      --packet-surface: linear-gradient(180deg, rgba(130, 176, 255, 0.95), rgba(78, 118, 196, 0.92));
+      --packet-ink: #f4f8ff;
+      --packet-glow: rgba(139, 194, 255, 0.16);
+    }
+
+    .trajectory-path.ready {
+      --rail-color: rgba(255, 229, 134, 0.88);
+      --packet-surface: linear-gradient(180deg, rgba(255, 238, 168, 0.94), rgba(212, 176, 82, 0.92));
+      --packet-ink: #322307;
+      --packet-glow: rgba(255, 229, 134, 0.18);
+    }
+
+    .trajectory-path.data-forward {
+      --rail-color: rgba(255, 179, 106, 0.78);
+      --packet-surface: linear-gradient(180deg, rgba(255, 196, 129, 0.94), rgba(198, 111, 67, 0.92));
+      --packet-ink: #2c1309;
+      --packet-glow: rgba(255, 179, 106, 0.16);
+    }
+
+    .trajectory-path.data-reverse {
+      --rail-color: rgba(139, 194, 255, 0.82);
+      --packet-surface: linear-gradient(180deg, rgba(184, 221, 255, 0.95), rgba(88, 146, 212, 0.92));
+      --packet-ink: #071f3a;
+      --packet-glow: rgba(139, 194, 255, 0.16);
+    }
+
+    .trajectory-packet {
+      position: absolute;
+      top: 50%;
+      left: var(--packet-start);
+      display: inline-flex;
+      align-items: center;
+      gap: 0.45rem;
+      min-width: 7rem;
+      padding: 0.42rem 0.78rem;
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      border-radius: 999px;
+      color: var(--packet-ink);
+      background: var(--packet-surface);
+      box-shadow: 0 0 0 0.24rem var(--packet-glow), 0 8px 22px rgba(0, 0, 0, 0.16);
+      font-size: 0.72rem;
+      font-weight: 700;
+      letter-spacing: 0.01em;
+      line-height: 1;
+      white-space: nowrap;
+      transform: translate(-50%, -50%);
+      animation: plane-packet var(--duration) linear infinite;
+      animation-delay: var(--delay, 0s);
+    }
+
+    .trajectory-packet::before {
+      content: "";
+      width: 0.46rem;
+      height: 0.46rem;
+      border-radius: 50%;
+      background: currentColor;
+      opacity: 0.62;
+      flex: none;
+    }
+
+    .trajectory-note {
+      display: grid;
+      gap: 0.22rem;
+      padding: 0.7rem 0.85rem 0.78rem;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 1rem;
+      background: rgba(8, 12, 15, 0.34);
+      color: rgba(247, 239, 226, 0.74);
+      font-size: 0.74rem;
+      line-height: 1.45;
+    }
+
+    .trajectory-note strong {
+      color: #fff4e7;
+      font-size: 0.64rem;
+      text-transform: uppercase;
+      letter-spacing: 0.11em;
+      margin-right: 0.38rem;
+    }
+
+    section.content {
+      position: relative;
+      padding: var(--section-gap) 0;
+    }
+
+    .section-head {
+      max-width: 42rem;
+      margin-bottom: 3.1rem;
+    }
+
+    .section-head h2 {
+      margin: 0.45rem 0 1rem;
+      font-family: var(--serif);
+      font-size: clamp(2.2rem, 4vw, 4.1rem);
+      line-height: 0.95;
+      letter-spacing: -0.05em;
+    }
+
+    .section-head p {
+      margin: 0;
+      font-size: 1.02rem;
+      color: var(--ink-soft);
+      max-width: 40rem;
+    }
+
+    .flow-layout {
+      display: grid;
+      grid-template-columns: minmax(0, 29rem) minmax(0, 1fr);
+      gap: clamp(2rem, 4vw, 4.5rem);
+      align-items: start;
+    }
+
+    .flow-figure {
+      position: sticky;
+      top: 1.7rem;
+      padding-top: 0.4rem;
+    }
+
+    .figure-shell {
+      padding: 1.25rem 0 1rem;
+      border-top: 1px solid var(--line-strong);
+    }
+
+    .figure-shell .figure-node-row {
+      position: relative;
+      min-height: 10.5rem;
+    }
+
+    .figure-rail {
+      left: 4%;
+      right: 4%;
+      top: 4.5rem;
+      transform: none;
+      background:
+        linear-gradient(90deg, rgba(22, 21, 20, 0.08), rgba(196, 90, 55, 0.72), rgba(22, 21, 20, 0.08));
+    }
+
+    .figure-node {
+      color: rgba(22, 21, 20, 0.48);
+      opacity: 0.46;
+    }
+
+    .figure-node::before {
+      background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.6), rgba(255, 255, 255, 0.2)),
+        rgba(255, 255, 255, 0.42);
+      border-color: rgba(22, 21, 20, 0.1);
+      box-shadow: none;
+    }
+
+    .figure-node strong {
+      color: rgba(22, 21, 20, 0.82);
+    }
+
+    .figure-node span,
+    .figure-node small {
+      color: rgba(22, 21, 20, 0.52);
+    }
+
+    .figure-node.active {
+      opacity: 1;
+      transform: translateY(-0.18rem);
+    }
+
+    .figure-node.active::before {
+      background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(255, 255, 255, 0.76)),
+        rgba(196, 90, 55, 0.1);
+      border-color: rgba(196, 90, 55, 0.36);
+      box-shadow: 0 0 0 0.28rem var(--accent-soft);
+    }
+
+    .figure-node.active.topic::before {
+      background:
+        linear-gradient(180deg, rgba(72, 92, 114, 0.96), rgba(58, 74, 94, 0.96)),
+        rgba(196, 90, 55, 0.04);
+    }
+
+    .figure-node.active.topic strong,
+    .figure-node.active.topic span,
+    .figure-node.active.topic small {
+      color: #eef4ff;
+    }
+
+    .figure-node.active.service::before {
+      background:
+        linear-gradient(180deg, rgba(40, 72, 53, 0.96), rgba(29, 56, 40, 0.96)),
+        rgba(196, 90, 55, 0.04);
+    }
+
+    .figure-node.active.service strong,
+    .figure-node.active.service span,
+    .figure-node.active.service small {
+      color: #effcef;
+    }
+
+    .kind-strip {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.65rem;
+      margin-top: 1.2rem;
+    }
+
+    .kind-pill {
+      display: inline-flex;
+      align-items: center;
+      min-height: 2rem;
+      padding: 0 0.8rem;
+      border-radius: 999px;
+      border: 1px solid rgba(22, 21, 20, 0.1);
+      font-size: 0.82rem;
+      color: rgba(22, 21, 20, 0.48);
+      transition: background-color 180ms ease, color 180ms ease, border-color 180ms ease;
+    }
+
+    .kind-pill.active {
+      background: rgba(196, 90, 55, 0.08);
+      color: var(--accent);
+      border-color: rgba(196, 90, 55, 0.26);
+    }
+
+    .state-console {
+      margin-top: 1.5rem;
+      padding-top: 1.4rem;
+      border-top: 1px solid var(--line);
+    }
+
+    .console-label {
+      margin: 0;
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.16em;
+      color: rgba(22, 21, 20, 0.52);
+    }
+
+    .state-console h3 {
+      margin: 0.55rem 0 0.65rem;
+      font-size: 1.45rem;
+      line-height: 1.1;
+      letter-spacing: -0.04em;
+    }
+
+    .state-console p {
+      margin: 0;
+      color: var(--ink-soft);
+    }
+
+    .console-meta {
+      margin-top: 0.75rem;
+      font-size: 0.92rem;
+      color: rgba(22, 21, 20, 0.62);
+    }
+
+    .step-list {
+      counter-reset: step;
+    }
+
+    .flow-step {
+      position: relative;
+      min-height: 72svh;
+      padding: 1rem 0 2.4rem;
+      border-top: 1px solid var(--line);
+      opacity: 0.38;
+      transform: translateY(1.2rem);
+      transition: opacity 280ms ease, transform 280ms ease;
+    }
+
+    .flow-step.visible,
+    .flow-step.is-active {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    .step-index {
+      display: inline-block;
+      margin-bottom: 0.8rem;
+      font-size: 0.86rem;
+      color: rgba(22, 21, 20, 0.48);
+      letter-spacing: 0.06em;
+    }
+
+    .flow-step h3 {
+      margin: 0;
+      font-size: clamp(1.45rem, 2.4vw, 2.05rem);
+      line-height: 1.04;
+      letter-spacing: -0.04em;
+    }
+
+    .flow-step p {
+      max-width: 38rem;
+      margin: 0.95rem 0 0;
+      color: var(--ink-soft);
+      font-size: 1rem;
+    }
+
+    .detail-band {
+      border-top: 1px solid var(--line-strong);
+      display: grid;
+      grid-template-columns: minmax(0, 1.1fr) minmax(18rem, 0.9fr);
+      gap: 2rem;
+      align-items: start;
+      padding-top: 2rem;
+    }
+
+    .wire-shell {
+      padding: 1.5rem;
+      border: 1px solid rgba(22, 21, 20, 0.12);
+      border-radius: 1.6rem;
+      background: rgba(255, 255, 255, 0.42);
+      backdrop-filter: blur(10px);
+    }
+
+    .wire-shell pre {
+      margin: 0;
+      padding: 1.2rem 1.15rem;
+      overflow: auto;
+      border-radius: 1.1rem;
+      font-size: 0.88rem;
+      line-height: 1.55;
+      color: #f7efe2;
+      background:
+        linear-gradient(180deg, rgba(41, 48, 55, 0.98), rgba(18, 23, 28, 0.98));
+    }
+
+    .facts {
+      display: grid;
+      gap: 1.15rem;
+    }
+
+    .fact {
+      padding-top: 1rem;
+      border-top: 1px solid var(--line);
+    }
+
+    .fact:first-child {
+      padding-top: 0;
+      border-top: 0;
+    }
+
+    .fact h3 {
+      margin: 0 0 0.45rem;
+      font-size: 1.05rem;
+      letter-spacing: -0.03em;
+    }
+
+    .fact p {
+      margin: 0;
+      color: var(--ink-soft);
+    }
+
+    .topology-band {
+      display: grid;
+      grid-template-columns: minmax(0, 0.92fr) minmax(0, 1.08fr);
+      gap: clamp(2rem, 4vw, 4rem);
+      align-items: start;
+      border-top: 1px solid var(--line-strong);
+      padding-top: 2rem;
+    }
+
+    .topology-copy p {
+      margin: 0 0 1rem;
+      color: var(--ink-soft);
+      max-width: 34rem;
+    }
+
+    .topology-figure {
+      margin: 0;
+    }
+
+    .topology-stage {
+      display: grid;
+      gap: 1rem;
+    }
+
+    .topology-frame {
+      position: relative;
+      overflow: hidden;
+      border-radius: 1.7rem;
+      border: 1px solid rgba(22, 21, 20, 0.12);
+      background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.58), rgba(255, 255, 255, 0.14)),
+        rgba(255, 255, 255, 0.36);
+      box-shadow: 0 24px 64px rgba(22, 21, 20, 0.12);
+      isolation: isolate;
+    }
+
+    .topology-frame::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.08), transparent 22%, transparent 84%, rgba(17, 23, 29, 0.07));
+      pointer-events: none;
+      z-index: 3;
+    }
+
+    .topology-figure img {
+      border-radius: 0;
+      border: 0;
+      box-shadow: none;
+    }
+
+    .topology-overlay {
+      position: absolute;
+      inset: 0;
+      z-index: 1;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+    }
+
+    .topology-route {
+      fill: none;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      stroke-width: 8;
+      stroke-dasharray: 16 18;
+      opacity: 0.68;
+      animation: topology-route 9.6s linear infinite;
+      filter: drop-shadow(0 0 12px rgba(17, 23, 29, 0.24));
+    }
+
+    .topology-route.local {
+      stroke-dasharray: 8 14;
+      opacity: 0.58;
+    }
+
+    .topology-route.ssh {
+      stroke: rgba(214, 124, 62, 0.96);
+    }
+
+    .topology-route.ssh-reply {
+      stroke: rgba(248, 209, 108, 0.94);
+      animation-direction: reverse;
+    }
+
+    .topology-route.https {
+      stroke: rgba(87, 145, 219, 0.96);
+    }
+
+    .topology-route.https-reply {
+      stroke: rgba(87, 176, 150, 0.96);
+      animation-direction: reverse;
+    }
+
+    .route-badge {
+      position: absolute;
+      z-index: 2;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.45rem;
+      min-height: 2.2rem;
+      padding: 0 0.9rem;
+      border-radius: 999px;
+      border: 1px solid rgba(255, 255, 255, 0.24);
+      color: #fff8ef;
+      font-size: 0.72rem;
+      font-weight: 700;
+      line-height: 1;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      backdrop-filter: blur(10px);
+      box-shadow: 0 12px 28px rgba(17, 23, 29, 0.18);
+    }
+
+    .route-badge::before {
+      content: "";
+      width: 0.5rem;
+      height: 0.5rem;
+      border-radius: 50%;
+      background: currentColor;
+      opacity: 0.78;
+      flex: none;
+    }
+
+    .route-badge.ssh {
+      top: 1rem;
+      left: 1rem;
+      background: rgba(132, 70, 38, 0.72);
+    }
+
+    .route-badge.https {
+      top: 1rem;
+      right: 1rem;
+      background: rgba(32, 81, 142, 0.72);
+    }
+
+    .topology-packet {
+      position: absolute;
+      left: var(--x1);
+      top: var(--y1);
+      z-index: 2;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.38rem;
+      min-height: 1.9rem;
+      padding: 0 0.72rem;
+      border: 1px solid rgba(255, 255, 255, 0.24);
+      border-radius: 999px;
+      color: var(--packet-ink);
+      background: var(--packet-surface);
+      box-shadow: 0 0 0 0.22rem var(--packet-glow), 0 10px 24px rgba(17, 23, 29, 0.18);
+      font-size: 0.67rem;
+      font-weight: 700;
+      line-height: 1;
+      letter-spacing: 0.01em;
+      white-space: nowrap;
+      transform: translate(-50%, -50%);
+      pointer-events: none;
+      animation: topology-packet-travel var(--duration, 8.8s) linear infinite;
+      animation-delay: var(--delay, 0s);
+    }
+
+    .topology-packet::before {
+      content: "";
+      width: 0.42rem;
+      height: 0.42rem;
+      border-radius: 50%;
+      background: currentColor;
+      opacity: 0.64;
+      flex: none;
+    }
+
+    .topology-packet.ssh {
+      --packet-surface: linear-gradient(180deg, rgba(255, 213, 163, 0.96), rgba(216, 129, 79, 0.94));
+      --packet-ink: #2a1307;
+      --packet-glow: rgba(255, 179, 106, 0.18);
+    }
+
+    .topology-packet.ssh-reply {
+      --packet-surface: linear-gradient(180deg, rgba(255, 244, 177, 0.96), rgba(214, 183, 92, 0.94));
+      --packet-ink: #342505;
+      --packet-glow: rgba(255, 229, 134, 0.2);
+    }
+
+    .topology-packet.https {
+      --packet-surface: linear-gradient(180deg, rgba(188, 222, 255, 0.96), rgba(96, 149, 214, 0.94));
+      --packet-ink: #0a213b;
+      --packet-glow: rgba(139, 194, 255, 0.18);
+    }
+
+    .topology-packet.https-reply {
+      --packet-surface: linear-gradient(180deg, rgba(194, 241, 220, 0.96), rgba(85, 168, 142, 0.94));
+      --packet-ink: #082218;
+      --packet-glow: rgba(132, 214, 156, 0.18);
+    }
+
+    .topology-annotations {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 0.85rem;
+    }
+
+    .topology-annotation {
+      padding: 1rem 1rem 1.05rem;
+      border: 1px solid rgba(22, 21, 20, 0.12);
+      border-radius: 1.25rem;
+      background: rgba(255, 255, 255, 0.46);
+      backdrop-filter: blur(10px);
+    }
+
+    .topology-annotation h3 {
+      margin: 0 0 0.65rem;
+      font-size: 1rem;
+      letter-spacing: -0.03em;
+    }
+
+    .topology-annotation p {
+      margin: 0.7rem 0 0;
+      color: var(--ink-soft);
+      font-size: 0.86rem;
+    }
+
+    .topology-annotation strong {
+      display: block;
+      margin-bottom: 0.24rem;
+      color: rgba(22, 21, 20, 0.54);
+      font-size: 0.66rem;
+      font-weight: 700;
+      line-height: 1.3;
+      letter-spacing: 0.13em;
+      text-transform: uppercase;
+    }
+
+    .topology-annotation.ssh {
+      background:
+        linear-gradient(180deg, rgba(255, 214, 170, 0.16), rgba(255, 255, 255, 0.42)),
+        rgba(255, 255, 255, 0.46);
+      border-color: rgba(196, 90, 55, 0.18);
+    }
+
+    .topology-annotation.broker {
+      background:
+        linear-gradient(180deg, rgba(63, 78, 96, 0.1), rgba(255, 255, 255, 0.42)),
+        rgba(255, 255, 255, 0.46);
+    }
+
+    .topology-annotation.https {
+      background:
+        linear-gradient(180deg, rgba(139, 194, 255, 0.18), rgba(255, 255, 255, 0.42)),
+        rgba(255, 255, 255, 0.46);
+      border-color: rgba(87, 145, 219, 0.18);
+    }
+
+    .topology-figure figcaption {
+      margin-top: 0.8rem;
+      font-size: 0.88rem;
+      color: rgba(22, 21, 20, 0.56);
+    }
+
+    .source-list {
+      border-top: 1px solid var(--line-strong);
+    }
+
+    .source-row {
+      display: grid;
+      grid-template-columns: minmax(12rem, 17rem) minmax(0, 1fr);
+      gap: 1.3rem;
+      align-items: start;
+      padding: 1rem 0;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .source-link {
+      font-size: 1rem;
+      font-weight: 600;
+      letter-spacing: -0.02em;
+      transition: color 160ms ease;
+    }
+
+    .source-row p {
+      margin: 0;
+      color: var(--ink-soft);
+    }
+
+    .footer-note {
+      padding: 1.8rem 0 3rem;
+      font-size: 0.9rem;
+      color: rgba(22, 21, 20, 0.56);
+    }
+
+    @keyframes plane-packet {
+      0% {
+        left: var(--packet-start);
+        opacity: 0;
+        transform: translate(-50%, -50%) scale(0.94);
+      }
+      10% {
+        opacity: 1;
+      }
+      88% {
+        opacity: 1;
+      }
+      100% {
+        left: var(--packet-end);
+        opacity: 0;
+        transform: translate(-50%, -50%) scale(0.94);
+      }
+    }
+
+    @keyframes topology-route {
+      from {
+        stroke-dashoffset: 0;
+      }
+      to {
+        stroke-dashoffset: -136;
+      }
+    }
+
+    @keyframes topology-packet-travel {
+      0% {
+        left: var(--x1);
+        top: var(--y1);
+        opacity: 0;
+        transform: translate(-50%, -50%) scale(0.92);
+      }
+      10% {
+        opacity: 1;
+      }
+      88% {
+        opacity: 1;
+      }
+      100% {
+        left: var(--x2);
+        top: var(--y2);
+        opacity: 0;
+        transform: translate(-50%, -50%) scale(0.96);
+      }
+    }
+
+    @media (max-width: 1080px) {
+      .hero-grid,
+      .flow-layout,
+      .detail-band,
+      .topology-band {
+        grid-template-columns: 1fr;
+      }
+
+      .hero {
+        min-height: auto;
+        padding-bottom: 2.2rem;
+      }
+
+      .hero-visual {
+        min-height: 33rem;
+      }
+
+      .flow-figure {
+        position: static;
+      }
+
+      .flow-step {
+        min-height: auto;
+        padding: 1rem 0 2rem;
+      }
+
+      .topology-annotations {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    @media (max-width: 760px) {
+      .topbar-row {
+        flex-direction: column;
+        align-items: flex-start;
+      }
+
+      .topnav {
+        gap: 0.9rem;
+        flex-wrap: wrap;
+      }
+
+      .hero {
+        padding-top: 6.6rem;
+      }
+
+      .hero-visual,
+      .flow-plane {
+        min-height: auto;
+      }
+
+      .hero-grid {
+        gap: 1.35rem;
+      }
+
+      .brandmark {
+        font-size: 3.45rem;
+      }
+
+      .headline {
+        max-width: 11ch;
+        margin: 0.9rem 0 0.7rem;
+        font-size: 1.2rem;
+      }
+
+      .intro {
+        font-size: 0.9rem;
+      }
+
+      .hero-meta {
+        gap: 0.45rem 0.75rem;
+        margin-top: 1rem;
+        font-size: 0.79rem;
+      }
+
+      .hero-meta span,
+      .plane-topline span,
+      .plane-footline span,
+      .trajectory-note span {
+        min-width: 0;
+      }
+
+      .hero-meta code,
+      .plane-topline code,
+      .plane-footline code,
+      .trajectory-note code,
+      .intro code {
+        white-space: normal;
+        overflow-wrap: anywhere;
+        word-break: break-word;
+      }
+
+      .hero-actions {
+        gap: 0.75rem;
+        margin-top: 1.25rem;
+      }
+
+      .button {
+        min-height: 2.6rem;
+        font-size: 0.9rem;
+      }
+
+      .plane-topline,
+      .plane-footline {
+        flex-direction: column;
+      }
+
+      .trajectory-row {
+        grid-template-columns: 1fr;
+        gap: 0.4rem;
+      }
+
+      .trajectory-label {
+        padding-top: 0;
+      }
+
+      .trajectory-note {
+        padding: 0.6rem 0.7rem 0.68rem;
+        font-size: 0.71rem;
+      }
+
+      .station::before,
+      .figure-node::before {
+        width: 2.8rem;
+        height: 2.8rem;
+        margin-bottom: 0.7rem;
+        border-radius: 0.9rem;
+      }
+
+      .station strong,
+      .figure-node strong {
+        font-size: 0.82rem;
+      }
+
+      .station span,
+      .figure-node span,
+      .station small,
+      .figure-node small {
+        font-size: 0.64rem;
+      }
+
+      .trajectory-packet {
+        min-width: 5.4rem;
+        padding: 0.34rem 0.62rem;
+        font-size: 0.65rem;
+      }
+
+      .source-row {
+        grid-template-columns: 1fr;
+        gap: 0.45rem;
+      }
+
+      .route-badge {
+        min-height: 1.9rem;
+        padding: 0 0.72rem;
+        font-size: 0.62rem;
+      }
+
+      .topology-packet {
+        min-height: 1.65rem;
+        padding: 0 0.56rem;
+        font-size: 0.58rem;
+        max-width: 42vw;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .topology-packet.detail-only {
+        display: none;
+      }
+
+      .topology-annotation {
+        padding: 0.9rem;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html {
+        scroll-behavior: auto;
+      }
+
+      *,
+      *::before,
+      *::after {
+        animation: none !important;
+        transition: none !important;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-row">
+      <a class="brand" href="../README.md">tcp-over-kafka / request walkthrough</a>
+      <nav class="topnav" aria-label="Section navigation">
+        <a href="#handshake">Handshake</a>
+        <a href="#wire">Wire layer</a>
+        <a href="#topology">Topology</a>
+        <a href="#source">Source map</a>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <section class="hero">
+      <div class="shell hero-grid">
+        <div>
+          <p class="eyebrow">Single topic / Symmetric nodes / Bidirectional TCP</p>
+          <h1 class="brandmark">tcp-over-kafka</h1>
+          <p class="headline">Packet-by-packet path for one proxied SSH request.</p>
+          <p class="intro">
+            The diagram shows which hops stay local, which frames cross Kafka, what each packet carries,
+            and how raw TCP payload starts flowing only after <code>KindReady</code>.
+          </p>
+          <div class="hero-meta">
+            <span>Example route <code>10.253.15.168:22 -> 10.253.15.168/ssh</code></span>
+            <span>One conversation key per <code>connectionID</code></span>
+            <span>Payload chunks capped by <code>maxFrameSize</code></span>
+          </div>
+          <div class="hero-actions">
+            <a class="button primary" href="#handshake">Trace the handshake</a>
+            <a class="button" href="#source">Jump to source files</a>
+          </div>
+        </div>
+
+        <div class="hero-visual">
+          <div class="flow-plane">
+            <div class="plane-topline">
+              <span><strong>Example session</strong> <code>10.253.15.167/proxy -> 10.253.15.168/ssh</code></span>
+              <span><strong>Stable key</strong> <code>10.253.15.167/proxy|10.253.15.168/ssh|7f3cbfe2d6a41c90</code></span>
+            </div>
+
+            <div class="plane-network">
+              <div class="plane-stations">
+                <div class="station">
+                  <strong>Client</strong>
+                  <span>SSH / curl / app</span>
+                  <small>local TCP origin</small>
+                </div>
+                <div class="station">
+                  <strong>Node A</strong>
+                  <span>SOCKS5 listener</span>
+                  <small>route lookup</small>
+                </div>
+                <div class="station topic">
+                  <strong>Kafka</strong>
+                  <span>shared topic</span>
+                  <small>conversation key</small>
+                </div>
+                <div class="station">
+                  <strong>Node B</strong>
+                  <span>destination runtime</span>
+                  <small>service dial</small>
+                </div>
+                <div class="station service">
+                  <strong>ssh</strong>
+                  <span>127.0.0.1:22</span>
+                  <small>local target</small>
+                </div>
+              </div>
+
+              <div class="trajectory-stack">
+                <div class="trajectory-row">
+                  <div class="trajectory-label">SOCKS5 CONNECT</div>
+                  <div class="trajectory-body">
+                    <div
+                      class="trajectory-path local"
+                      style="--span-start: 0%; --span-end: 25%; --packet-start: 0%; --packet-end: 25%; --duration: 6.4s;"
+                    >
+                      <div class="trajectory-packet" style="--delay: -0.8s;">CONNECT 10.253.15.168:22</div>
+                    </div>
+                    <div class="trajectory-note">
+                      <span><strong>Contents</strong> method=<code>no-auth</code>, cmd=<code>CONNECT</code>, target=<code>10.253.15.168:22</code></span>
+                      <span><strong>Trajectory</strong> <code>sshproxy.Run -> socks5.Connect -> socks5.Accept</code> on Node A</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="trajectory-row">
+                  <div class="trajectory-label">KindOpen</div>
+                  <div class="trajectory-body">
+                    <div
+                      class="trajectory-path open"
+                      style="--span-start: 25%; --span-end: 75%; --packet-start: 25%; --packet-end: 75%; --duration: 7.1s;"
+                    >
+                      <div class="trajectory-packet" style="--delay: -1.7s;">Open / conn 7f3c…</div>
+                    </div>
+                    <div class="trajectory-note">
+                      <span><strong>Contents</strong> src=<code>10.253.15.167/proxy</code>, dst=<code>10.253.15.168/ssh</code>, payload=<code>none</code></span>
+                      <span><strong>Trajectory</strong> route hit -> <code>bus.Send</code> -> Kafka hash key -> <code>nodeReceiveLoop</code> on Node B</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="trajectory-row">
+                  <div class="trajectory-label">Peer local dial</div>
+                  <div class="trajectory-body">
+                    <div
+                      class="trajectory-path service-local"
+                      style="--span-start: 75%; --span-end: 100%; --packet-start: 75%; --packet-end: 100%; --duration: 6.6s;"
+                    >
+                      <div class="trajectory-packet" style="--delay: -2.5s;">dial 127.0.0.1:22</div>
+                    </div>
+                    <div class="trajectory-note">
+                      <span><strong>Contents</strong> service lookup <code>ssh -> 127.0.0.1:22</code>, new inbound session, same <code>connectionID</code></span>
+                      <span><strong>Trajectory</strong> <code>resolveServerService</code> -> <code>dialContext(\"tcp\", \"127.0.0.1:22\")</code></span>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="trajectory-row">
+                  <div class="trajectory-label">KindOpenAck</div>
+                  <div class="trajectory-body">
+                    <div
+                      class="trajectory-path ack"
+                      style="--span-start: 25%; --span-end: 75%; --packet-start: 75%; --packet-end: 25%; --duration: 6.8s;"
+                    >
+                      <div class="trajectory-packet" style="--delay: -0.6s;">OpenAck / no payload</div>
+                    </div>
+                    <div class="trajectory-note">
+                      <span><strong>Contents</strong> kind=<code>OpenAck</code>, src=<code>10.253.15.168/ssh</code>, dst=<code>10.253.15.167/proxy</code></span>
+                      <span><strong>Trajectory</strong> Node B confirms the target socket is open before Node A replies success to the local SOCKS client</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="trajectory-row">
+                  <div class="trajectory-label">KindReady</div>
+                  <div class="trajectory-body">
+                    <div
+                      class="trajectory-path ready"
+                      style="--span-start: 25%; --span-end: 75%; --packet-start: 25%; --packet-end: 75%; --duration: 7s;"
+                    >
+                      <div class="trajectory-packet" style="--delay: -2.2s;">Ready / start return pump</div>
+                    </div>
+                    <div class="trajectory-note">
+                      <span><strong>Contents</strong> kind=<code>Ready</code>, payload=<code>none</code>, means the SOCKS success reply has already been written</span>
+                      <span><strong>Trajectory</strong> Node A sends <code>Ready</code> -> Node B starts <code>serverPumpOutbound</code></span>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="trajectory-row">
+                  <div class="trajectory-label">KindData forward</div>
+                  <div class="trajectory-body">
+                    <div
+                      class="trajectory-path data-forward"
+                      style="--span-start: 0%; --span-end: 100%; --packet-start: 0%; --packet-end: 100%; --duration: 7.8s;"
+                    >
+                      <div class="trajectory-packet" style="--delay: -1.4s;">8 KiB SSH KEXINIT</div>
+                      <div class="trajectory-packet" style="--delay: -4.9s;">4 KiB auth bytes</div>
+                    </div>
+                    <div class="trajectory-note">
+                      <span><strong>Contents</strong> kind=<code>Data</code>, payload=raw TCP bytes, each chunk <= <code>32768</code> bytes</span>
+                      <span><strong>Trajectory</strong> client socket read -> frame marshal on Node A -> Kafka topic -> <code>writeAll</code> into Node B&apos;s SSH socket</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="trajectory-row">
+                  <div class="trajectory-label">KindData return</div>
+                  <div class="trajectory-body">
+                    <div
+                      class="trajectory-path data-reverse"
+                      style="--span-start: 0%; --span-end: 100%; --packet-start: 100%; --packet-end: 0%; --duration: 8.2s;"
+                    >
+                      <div class="trajectory-packet" style="--delay: -0.4s;">SSH-2.0 banner</div>
+                      <div class="trajectory-packet" style="--delay: -4.1s;">stdout / reply bytes</div>
+                    </div>
+                    <div class="trajectory-note">
+                      <span><strong>Contents</strong> kind=<code>Data</code>, payload=remote banner, key exchange, stdout, or response bytes</span>
+                      <span><strong>Trajectory</strong> peer socket read on Node B -> Kafka topic -> outbound session lookup -> write back to the client connection</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="plane-footline">
+              <span><strong>Legend</strong> pale rails are local socket hops, amber rails are outbound Kafka frames, blue rails return to the origin</span>
+              <span><strong>Payload rule</strong> control frames carry routing metadata only; <code>KindData</code> carries raw TCP bytes</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="handshake" class="content">
+      <div class="shell">
+        <div class="section-head">
+          <p class="eyebrow">Handshake</p>
+          <h2>One request, seven transitions</h2>
+          <p>
+            The runtime does not treat Kafka as a byte pipe. Each session is admitted in phases:
+            local SOCKS5 negotiation, remote service dial, an explicit <code>OpenAck</code>, then
+            a <code>Ready</code> signal that releases the return path.
+          </p>
+        </div>
+
+        <div class="flow-layout">
+          <div class="flow-figure">
+            <div class="figure-shell">
+              <div class="figure-node-row">
+                <div class="figure-rail"></div>
+                <div class="figure-node" data-node="client">
+                  <strong>Client</strong>
+                  <span>stdio or SOCKS app</span>
+                  <small>TCP origin</small>
+                </div>
+                <div class="figure-node" data-node="node-a">
+                  <strong>Node A</strong>
+                  <span><code>proxy</code></span>
+                  <small>route + publish</small>
+                </div>
+                <div class="figure-node topic" data-node="topic">
+                  <strong>Topic</strong>
+                  <span>Kafka fabric</span>
+                  <small>ordered by key</small>
+                </div>
+                <div class="figure-node" data-node="node-b">
+                  <strong>Node B</strong>
+                  <span><code>ssh</code></span>
+                  <small>dial + pump</small>
+                </div>
+                <div class="figure-node service" data-node="service">
+                  <strong>Service</strong>
+                  <span>127.0.0.1:22</span>
+                  <small>target socket</small>
+                </div>
+              </div>
+
+              <div class="kind-strip">
+                <span class="kind-pill" data-kind="open">Open</span>
+                <span class="kind-pill" data-kind="openack">OpenAck</span>
+                <span class="kind-pill" data-kind="ready">Ready</span>
+                <span class="kind-pill" data-kind="data">Data</span>
+                <span class="kind-pill" data-kind="close">Close</span>
+                <span class="kind-pill" data-kind="error">Error</span>
+              </div>
+
+              <div class="state-console">
+                <p class="console-label">Active stage</p>
+                <h3 id="active-title">Ingress through ProxyCommand or SOCKS5</h3>
+                <p id="active-summary">
+                  A local process opens the node listener. If SSH uses <code>tcp-over-kafka proxy</code>,
+                  stdio is already bridged into a SOCKS5 CONNECT request.
+                </p>
+                <p class="console-meta" id="active-meta">
+                  Source path: <code>cmd/tcp-over-kafka/commands.go -> pkg/sshproxy/sshproxy.go -> pkg/socks5/socks5.go</code>
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div class="step-list">
+            <article
+              class="flow-step is-active"
+              data-title="Ingress through ProxyCommand or SOCKS5"
+              data-summary="A local process opens the node listener. If SSH uses tcp-over-kafka proxy, stdio is already bridged into a SOCKS5 CONNECT request."
+              data-meta="Source path: cmd/tcp-over-kafka/commands.go -> pkg/sshproxy/sshproxy.go -> pkg/socks5/socks5.go"
+              data-nodes="client node-a"
+              data-kinds=""
+            >
+              <span class="step-index">01</span>
+              <h3>Ingress through <code>ProxyCommand</code> or plain SOCKS5</h3>
+              <p>
+                OpenSSH can start at <code>tcp-over-kafka proxy --socks 127.0.0.1:12345 10.253.15.168 22</code>.
+                That helper dials the local SOCKS5 listener, requests the target, then relays stdin and stdout into the socket.
+                A SOCKS5-aware client can skip the helper and connect directly.
+              </p>
+              <p>
+                Kafka is not involved yet. The node is still in the local negotiation phase, deciding whether it can accept the target and map it to a known remote endpoint.
+              </p>
+            </article>
+
+            <article
+              class="flow-step"
+              data-title="SOCKS5 target accepted and mapped to a peer endpoint"
+              data-summary="handleClientConn reads the CONNECT target, resolves it through routes, and stamps the source endpoint as platformID/proxy."
+              data-meta="Runtime path: pkg/tunnel/client.go handleClientConn -> resolveClientRoute"
+              data-nodes="node-a"
+              data-kinds="open"
+            >
+              <span class="step-index">02</span>
+              <h3>Target accepted, route resolved, identities fixed</h3>
+              <p>
+                <code>socks5.Accept</code> returns the requested <code>host:port</code>. The node checks its
+                <code>routes</code> map and turns that address into a peer tuple such as
+                <code>10.253.15.168/ssh</code>.
+              </p>
+              <p>
+                The outbound source is always <code>platformID/proxy</code>. A new random
+                <code>connectionID</code> is generated here, and that identity stays attached to every frame for the rest of the TCP session.
+              </p>
+            </article>
+
+            <article
+              class="flow-step"
+              data-title="Open frame published to the shared topic"
+              data-summary="The client session sends KindOpen into Kafka with the route-derived peer endpoint and the per-session connectionID."
+              data-meta="Transport path: pkg/tunnel/client.go clientSession.frame -> pkg/tunnel/bus.go Send"
+              data-nodes="node-a topic node-b"
+              data-kinds="open"
+            >
+              <span class="step-index">03</span>
+              <h3><code>KindOpen</code> enters Kafka as the session opener</h3>
+              <p>
+                The first frame carries source platform and device, destination platform and device,
+                and the connection ID. The Kafka message key is the stable conversation key derived from both endpoints plus that ID.
+              </p>
+              <p>
+                Because the writer uses hash balancing on that key, all frames for the same logical conversation stay ordered together even though the whole deployment shares one topic.
+              </p>
+            </article>
+
+            <article
+              class="flow-step"
+              data-title="Destination node filters the topic and dials the local service"
+              data-summary="Every node reads the same topic in its own consumer group. Only the frame whose DestinationPlatformID matches continues into serverOpenSession."
+              data-meta="Receive path: pkg/tunnel/node.go nodeReceiveLoop -> pkg/tunnel/server.go serverOpenSession"
+              data-nodes="topic node-b service"
+              data-kinds="open openack"
+            >
+              <span class="step-index">04</span>
+              <h3>Peer admission happens after topic fan-out</h3>
+              <p>
+                Each node consumes the topic with a consumer group derived from its own
+                <code>platformID</code>. Frames addressed to some other platform are ignored. The matching node
+                resolves the destination <code>deviceID</code> through its <code>services</code> map and dials the local target, for example <code>ssh -> 127.0.0.1:22</code>.
+              </p>
+              <p>
+                If that dial succeeds, the peer registers an inbound session and sends <code>KindOpenAck</code>
+                back to the original <code>proxy</code> endpoint. If service lookup or dial fails, the peer returns <code>KindError</code> instead.
+              </p>
+            </article>
+
+            <article
+              class="flow-step"
+              data-title="OpenAck unlocks the SOCKS5 success reply, then Ready starts the reverse pump"
+              data-summary="The origin does not mark the session ready until OpenAck arrives, the SOCKS5 success reply is written, and KindReady is sent back."
+              data-meta="Handshake path: pkg/tunnel/client.go onOpenAck -> pkg/tunnel/node.go KindReady branch"
+              data-nodes="node-a topic node-b"
+              data-kinds="openack ready"
+            >
+              <span class="step-index">05</span>
+              <h3><code>OpenAck</code> and <code>Ready</code> complete the cross-node handshake</h3>
+              <p>
+                When the origin receives <code>KindOpenAck</code>, it writes the SOCKS5 success reply to the local client and only then emits <code>KindReady</code>.
+                That means the user process is told "connected" only after the peer has already opened the target socket.
+              </p>
+              <p>
+                The destination waits for <code>KindReady</code> before it starts reading bytes from the local service and publishing them back into Kafka. This avoids a race where the peer could speak before the SOCKS5 side is released.
+              </p>
+            </article>
+
+            <article
+              class="flow-step"
+              data-title="Both TCP sockets now stream through KindData frames"
+              data-summary="clientPumpOutbound reads the local socket, serverPumpOutbound reads the peer service, and both directions exchange KindData payloads up to maxFrameSize."
+              data-meta="Streaming path: pkg/tunnel/client.go clientPumpOutbound <-> pkg/tunnel/server.go serverPumpOutbound"
+              data-nodes="client node-a topic node-b service"
+              data-kinds="data ready"
+            >
+              <span class="step-index">06</span>
+              <h3>Bidirectional payload relay starts after the gate opens</h3>
+              <p>
+                The outbound side chunks local reads into <code>KindData</code> frames up to
+                <code>maxFrameSize</code>, which defaults to <code>32768</code> bytes. The inbound side mirrors the same logic in reverse, reading from the target socket and publishing return traffic back to the origin.
+              </p>
+              <p>
+                On receive, the runtime looks up either the outbound or inbound session registry and writes the frame payload into the corresponding TCP connection. Kafka carries bytes, but the node runtime decides which local socket they belong to.
+              </p>
+            </article>
+
+            <article
+              class="flow-step"
+              data-title="The conversation closes with KindClose or KindError"
+              data-summary="EOF, write failures, route misses, or remote dial problems terminate the session by returning SOCKS failure locally or publishing KindClose or KindError."
+              data-meta="Teardown path: pkg/tunnel/client.go close handling -> pkg/tunnel/node.go KindClose or KindError branches"
+              data-nodes="node-a topic node-b service"
+              data-kinds="close error"
+            >
+              <span class="step-index">07</span>
+              <h3>Teardown is explicit, not inferred</h3>
+              <p>
+                If a route is missing, the request fails before any Kafka frame is sent and the client sees a SOCKS general failure. If the peer cannot resolve or dial the requested service, it sends <code>KindError</code> back to the origin.
+              </p>
+              <p>
+                Normal stream shutdown on either side publishes <code>KindClose</code>. The registries remove the session and close the local socket so the logical conversation ends cleanly on both nodes.
+              </p>
+            </article>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="wire" class="content">
+      <div class="shell">
+        <div class="section-head">
+          <p class="eyebrow">Wire layer</p>
+          <h2>What actually rides on the topic</h2>
+          <p>
+            The wire schema is binary and versioned. Runtime state comes from frame kind, endpoint identity,
+            and connection ID, not from a hidden out-of-band control channel.
+          </p>
+        </div>
+
+        <div class="detail-band">
+          <div class="wire-shell">
+            <pre><code>Magic                TKK1
+Version              3
+Kind                 Open | OpenAck | Ready | Data | Close | Error
+SourcePlatformID     10.253.15.167
+SourceDeviceID       proxy
+DestinationPlatformID 10.253.15.168
+DestinationDeviceID  ssh
+ConnectionID         7f3cbfe2d6a41c90
+Sequence             uint64 field in the schema
+Payload              raw TCP bytes for KindData
+Err                  text for KindError
+
+Kafka message key    10.253.15.167/proxy|10.253.15.168/ssh|7f3cbfe2d6a41c90</code></pre>
+          </div>
+
+          <div class="facts">
+            <div class="fact">
+              <h3>Identity</h3>
+              <p>
+                <code>platformID</code> names a node. <code>deviceID</code> names one service on that node.
+                Outbound sessions always originate from the fixed device <code>proxy</code>, which keeps reply routing deterministic.
+              </p>
+            </div>
+
+            <div class="fact">
+              <h3>Ordering</h3>
+              <p>
+                The runtime derives one stable conversation key from both endpoints and the connection ID, sorts the endpoint strings, and uses that value as the Kafka message key. That is the current ordering mechanism for a session.
+              </p>
+            </div>
+
+            <div class="fact">
+              <h3>Admission control</h3>
+              <p>
+                New readers start at <code>LastOffset</code>. Each node consumes the shared topic in its own
+                consumer group and filters by <code>DestinationPlatformID</code> before acting on a frame.
+              </p>
+            </div>
+
+            <div class="fact">
+              <h3>Failure handling</h3>
+              <p>
+                Unreadable frames are discarded instead of crashing the reader. Routing and service failures return <code>KindError</code>. Socket shutdowns propagate as <code>KindClose</code>.
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="topology" class="content">
+      <div class="shell">
+        <div class="section-head">
+          <p class="eyebrow">Topology</p>
+          <h2>The request path sits inside a symmetric node deployment</h2>
+          <p>
+            The same runtime runs on both sides. Each node owns a SOCKS5 listener for outbound traffic and a service map for inbound traffic, so the flow above can happen in either direction.
+          </p>
+        </div>
+
+        <div class="topology-band">
+          <div class="topology-copy">
+            <p>
+              The minimal shape is one broker plus two nodes. Each node subscribes to the shared topic with its own consumer group,
+              publishes with the same frame schema, and can both originate and terminate proxied sessions.
+            </p>
+            <p>
+              The overlay below animates that symmetry on the repository diagram itself. Orange follows User-A SSH traffic into area-B,
+              while blue mirrors the same state machine for User-B posting back into area-A.
+            </p>
+            <p>
+              Each moving capsule names the packet contents on that leg, and the notes underneath spell out how those bytes cross the local listener,
+              the Kafka topic, and the peer-side service map.
+            </p>
+          </div>
+
+          <figure class="topology-figure">
+            <div class="topology-stage">
+              <div class="topology-frame">
+                <img src="./new-arch.png" alt="Architecture diagram for the tcp-over-kafka symmetric node deployment with animated packet overlays for SSH and HTTPS proxy traffic">
+                <svg class="topology-overlay" viewBox="0 0 1584 661" aria-hidden="true" preserveAspectRatio="none">
+                  <path class="topology-route ssh local" d="M 48 149 L 224 149 L 474 193" />
+                  <path class="topology-route ssh" d="M 474 193 L 731 536" />
+                  <path class="topology-route ssh" d="M 849 536 L 1038 194" />
+                  <path class="topology-route ssh local" d="M 1038 194 L 1223 146" />
+
+                  <path class="topology-route ssh-reply local" d="M 1223 146 L 1038 194" />
+                  <path class="topology-route ssh-reply" d="M 1038 194 L 849 536" />
+                  <path class="topology-route ssh-reply" d="M 731 536 L 474 193" />
+                  <path class="topology-route ssh-reply local" d="M 474 193 L 224 149 L 48 149" />
+
+                  <path class="topology-route https local" d="M 1530 174 L 1284 171 L 1038 194" />
+                  <path class="topology-route https" d="M 1038 194 L 849 536" />
+                  <path class="topology-route https" d="M 731 536 L 474 193" />
+                  <path class="topology-route https local" d="M 474 193 L 302 223" />
+
+                  <path class="topology-route https-reply local" d="M 302 223 L 474 193" />
+                  <path class="topology-route https-reply" d="M 474 193 L 731 536" />
+                  <path class="topology-route https-reply" d="M 849 536 L 1038 194" />
+                  <path class="topology-route https-reply local" d="M 1038 194 L 1284 171 L 1530 174" />
+                </svg>
+
+                <div class="route-badge ssh">A -> B SSH stream</div>
+                <div class="route-badge https">B -> A HTTPS stream</div>
+
+                <div
+                  class="topology-packet ssh"
+                  style="--x1: 3%; --y1: 22.5%; --x2: 30%; --y2: 29.2%; --duration: 9.2s; --delay: -0.7s;"
+                >
+                  CONNECT area-B:ssh
+                </div>
+                <div
+                  class="topology-packet ssh detail-only"
+                  style="--x1: 30%; --y1: 29.2%; --x2: 46.2%; --y2: 81%; --duration: 9s; --delay: -2.2s;"
+                >
+                  KindOpen dst=area-B/ssh
+                </div>
+                <div
+                  class="topology-packet ssh"
+                  style="--x1: 53.7%; --y1: 81%; --x2: 65.5%; --y2: 29.4%; --duration: 9.2s; --delay: -4.8s;"
+                >
+                  KindData SSH KEXINIT
+                </div>
+                <div
+                  class="topology-packet ssh-reply detail-only"
+                  style="--x1: 77.2%; --y1: 22.1%; --x2: 65.5%; --y2: 29.4%; --duration: 8.8s; --delay: -3.3s;"
+                >
+                  local dial 127.0.0.1:22
+                </div>
+                <div
+                  class="topology-packet ssh-reply"
+                  style="--x1: 65.5%; --y1: 29.4%; --x2: 30%; --y2: 29.2%; --duration: 9.4s; --delay: -6.1s;"
+                >
+                  OpenAck, Ready, SSH banner
+                </div>
+                <div
+                  class="topology-packet ssh-reply"
+                  style="--x1: 30%; --y1: 29.2%; --x2: 3%; --y2: 22.5%; --duration: 8.8s; --delay: -1.6s;"
+                >
+                  stdout and tty bytes
+                </div>
+
+                <div
+                  class="topology-packet https"
+                  style="--x1: 97%; --y1: 26.3%; --x2: 65.5%; --y2: 29.4%; --duration: 9.1s; --delay: -2.8s;"
+                >
+                  POST / -> area-A:web-service
+                </div>
+                <div
+                  class="topology-packet https detail-only"
+                  style="--x1: 65.5%; --y1: 29.4%; --x2: 46.2%; --y2: 81%; --duration: 9.3s; --delay: -5.1s;"
+                >
+                  KindOpen + HTTP body
+                </div>
+                <div
+                  class="topology-packet https"
+                  style="--x1: 46.2%; --y1: 81%; --x2: 30%; --y2: 29.2%; --duration: 9s; --delay: -7.2s;"
+                >
+                  deliver area-A/web-service
+                </div>
+                <div
+                  class="topology-packet https-reply detail-only"
+                  style="--x1: 19.1%; --y1: 33.7%; --x2: 30%; --y2: 29.2%; --duration: 8.7s; --delay: -4.3s;"
+                >
+                  local dial 127.0.0.1:8080
+                </div>
+                <div
+                  class="topology-packet https-reply"
+                  style="--x1: 30%; --y1: 29.2%; --x2: 65.5%; --y2: 29.4%; --duration: 9.4s; --delay: -0.9s;"
+                >
+                  200 OK plus response bytes
+                </div>
+                <div
+                  class="topology-packet https-reply"
+                  style="--x1: 65.5%; --y1: 29.4%; --x2: 97%; --y2: 26.3%; --duration: 8.9s; --delay: -6.8s;"
+                >
+                  response forwarded to User-B
+                </div>
+              </div>
+
+              <div class="topology-annotations">
+                <div class="topology-annotation ssh">
+                  <h3>User-A to area-B <code>ssh</code></h3>
+                  <p>
+                    <strong>Contents</strong>
+                    The ingress capsule is the local SOCKS5 or <code>ProxyCommand</code> request naming <code>area-B:ssh</code>. After routing, the node emits <code>KindOpen</code> and then <code>KindData</code> carrying raw SSH bytes such as banner, KEXINIT, auth, and channel payload.
+                  </p>
+                  <p>
+                    <strong>Trajectory</strong>
+                    User-A enters the area-A listener, the area-A node publishes to Kafka, the area-B node consumes because <code>DestinationPlatformID=area-B</code>, and the peer dials its local <code>ssh</code> socket. Reply traffic returns as <code>OpenAck</code>, <code>Ready</code>, and reverse <code>KindData</code>.
+                  </p>
+                </div>
+
+                <div class="topology-annotation broker">
+                  <h3>Kafka envelope and routing key</h3>
+                  <p>
+                    <strong>Contents</strong>
+                    Every moving packet on the broker legs is one frame from the shared schema: <code>KindOpen</code>, <code>KindOpenAck</code>, <code>KindReady</code>, <code>KindData</code>, or <code>KindClose</code>. The payload is raw TCP bytes only for <code>KindData</code>; the rest are control frames with connection metadata.
+                  </p>
+                  <p>
+                    <strong>Trajectory</strong>
+                    Both nodes publish into one shared topic, consume in separate groups, and ignore frames whose destination platform does not match. Ordering comes from the stable conversation key derived from the two endpoints plus <code>ConnectionID</code>.
+                  </p>
+                </div>
+
+                <div class="topology-annotation https">
+                  <h3>User-B to area-A <code>web-service</code></h3>
+                  <p>
+                    <strong>Contents</strong>
+                    The mirrored blue path shows the same state machine for HTTP. The forward stream carries a local POST request as <code>KindOpen</code> followed by <code>KindData</code>; the return stream carries the HTTP status line, headers, and body bytes back to User-B.
+                  </p>
+                  <p>
+                    <strong>Trajectory</strong>
+                    User-B enters the area-B node, the broker relays frames to area-A, and the area-A node resolves <code>web-service</code> through its service map before dialing the local socket. Nothing about the protocol changes except the destination device and the TCP payload itself.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <figcaption>Repository architecture diagram from <a href="../README.md">README.md</a>, now overlaid with live packet routes and packet-content annotations.</figcaption>
+          </figure>
+        </div>
+      </div>
+    </section>
+
+    <section id="source" class="content">
+      <div class="shell">
+        <div class="section-head">
+          <p class="eyebrow">Source map</p>
+          <h2>Trace the flow in code</h2>
+          <p>
+            Read the request path from operator-facing entrypoints down into the runtime. These files are the shortest direct path through the implementation.
+          </p>
+        </div>
+
+        <div class="source-list">
+          <a class="source-row" href="../cmd/tcp-over-kafka/commands.go">
+            <span class="source-link">cmd/tcp-over-kafka/commands.go</span>
+            <p>Defines the public <code>node</code> and <code>proxy</code> commands and shows how users enter the runtime.</p>
+          </a>
+
+          <a class="source-row" href="../pkg/sshproxy/sshproxy.go">
+            <span class="source-link">pkg/sshproxy/sshproxy.go</span>
+            <p>Bridges OpenSSH <code>ProxyCommand</code> stdio into the local SOCKS5 connection before tunnel logic begins.</p>
+          </a>
+
+          <a class="source-row" href="../pkg/socks5/socks5.go">
+            <span class="source-link">pkg/socks5/socks5.go</span>
+            <p>Parses the SOCKS5 greeting and CONNECT request and emits the success or failure replies that the client sees.</p>
+          </a>
+
+          <a class="source-row" href="../pkg/tunnel/client.go">
+            <span class="source-link">pkg/tunnel/client.go</span>
+            <p>Creates outbound sessions, resolves routes, sends <code>Open</code>, waits for <code>OpenAck</code>, emits <code>Ready</code>, and pumps local bytes into Kafka.</p>
+          </a>
+
+          <a class="source-row" href="../pkg/tunnel/node.go">
+            <span class="source-link">pkg/tunnel/node.go</span>
+            <p>Runs the symmetric node loop, filters frames by destination platform, and dispatches open, ready, data, close, and error handling.</p>
+          </a>
+
+          <a class="source-row" href="../pkg/tunnel/server.go">
+            <span class="source-link">pkg/tunnel/server.go</span>
+            <p>Dials the peer-side local service, sends <code>OpenAck</code>, and returns target bytes through <code>serverPumpOutbound</code>.</p>
+          </a>
+
+          <a class="source-row" href="../pkg/tunnel/bus.go">
+            <span class="source-link">pkg/tunnel/bus.go</span>
+            <p>Encodes frames, uses the conversation key as the Kafka message key, and discards unreadable frames during receive.</p>
+          </a>
+
+          <a class="source-row" href="../pkg/frame/frame.go">
+            <span class="source-link">pkg/frame/frame.go</span>
+            <p>Defines the versioned binary schema that every frame on the shared topic uses.</p>
+          </a>
+        </div>
+
+        <p class="footer-note">
+          Open this file directly in a browser or through any static file server. It has no build step and no external asset dependency.
+        </p>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const steps = Array.from(document.querySelectorAll(".flow-step"));
+    const nodes = Array.from(document.querySelectorAll(".figure-node"));
+    const kindPills = Array.from(document.querySelectorAll(".kind-pill"));
+    const activeTitle = document.getElementById("active-title");
+    const activeSummary = document.getElementById("active-summary");
+    const activeMeta = document.getElementById("active-meta");
+
+    function activateStep(step) {
+      if (!step) {
+        return;
+      }
+
+      steps.forEach((item) => item.classList.toggle("is-active", item === step));
+
+      const activeNodes = new Set((step.dataset.nodes || "").split(/\s+/).filter(Boolean));
+      nodes.forEach((node) => {
+        node.classList.toggle("active", activeNodes.has(node.dataset.node));
+      });
+
+      const activeKinds = new Set((step.dataset.kinds || "").split(/\s+/).filter(Boolean));
+      kindPills.forEach((pill) => {
+        pill.classList.toggle("active", activeKinds.has(pill.dataset.kind));
+      });
+
+      activeTitle.innerHTML = step.dataset.title || "";
+      activeSummary.innerHTML = step.dataset.summary || "";
+      activeMeta.textContent = step.dataset.meta || "";
+    }
+
+    const stepObserver = new IntersectionObserver(
+      (entries) => {
+        const visible = entries
+          .filter((entry) => entry.isIntersecting)
+          .sort((left, right) => right.intersectionRatio - left.intersectionRatio)[0];
+
+        if (visible) {
+          activateStep(visible.target);
+        }
+      },
+      {
+        threshold: [0.3, 0.5, 0.7],
+        rootMargin: "-10% 0px -28% 0px",
+      }
+    );
+
+    steps.forEach((step) => {
+      stepObserver.observe(step);
+    });
+
+    const revealObserver = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => {
+          if (entry.isIntersecting) {
+            entry.target.classList.add("visible");
+            revealObserver.unobserve(entry.target);
+          }
+        });
+      },
+      { threshold: 0.18 }
+    );
+
+    steps.forEach((step) => {
+      revealObserver.observe(step);
+    });
+
+    activateStep(steps[0]);
+  </script>
+</body>
+</html>

@@ -85,8 +85,86 @@ func brokerReachable(addr string) error {
 	return conn.Close()
 }
 
+func brokerRemoteSpec(env map[string]string) string {
+	host := strings.TrimSpace(env["BROKER_SSH_HOST"])
+	if host == "" {
+		return ""
+	}
+	user := strings.TrimSpace(env["BROKER_SSH_USER"])
+	if user == "" {
+		user = strings.TrimSpace(env["REMOTE_SSH_USER"])
+	}
+	if user == "" {
+		user = "root"
+	}
+	return fmt.Sprintf("%s@%s", user, host)
+}
+
+func brokerPort(addr string) string {
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return "9092"
+	}
+	return port
+}
+
+func remoteBrokerExec(env map[string]string, remoteCommand string) ([]byte, error) {
+	remote := brokerRemoteSpec(env)
+	if remote == "" {
+		return nil, errors.New("missing broker ssh host")
+	}
+
+	sshArgs := []string{
+		"-o", "StrictHostKeyChecking=no",
+		"-o", "UserKnownHostsFile=/dev/null",
+		"-o", "LogLevel=ERROR",
+	}
+	remoteShell := fmt.Sprintf("bash -lc %q", remoteCommand)
+
+	if auth := strings.TrimSpace(env["SSH_AUTH"]); auth != "" {
+		sshArgs = append(sshArgs, "-o", "BatchMode=yes", "-i", auth, remote, remoteShell)
+		return exec.Command("ssh", sshArgs...).CombinedOutput()
+	}
+	if password := strings.TrimSpace(env["SSH_PASSWORD"]); password != "" {
+		if _, err := exec.LookPath("sshpass"); err != nil {
+			return nil, err
+		}
+		sshArgs = append(sshArgs,
+			"-o", "BatchMode=no",
+			"-o", "NumberOfPasswordPrompts=1",
+			"-o", "PreferredAuthentications=password",
+			"-o", "PubkeyAuthentication=no",
+			remote,
+			remoteShell,
+		)
+		cmd := exec.Command("sshpass", append([]string{"-e", "ssh"}, sshArgs...)...)
+		cmd.Env = append(cmd.Environ(), "SSHPASS="+password)
+		return cmd.CombinedOutput()
+	}
+
+	sshArgs = append(sshArgs, "-o", "BatchMode=yes", remote, remoteShell)
+	return exec.Command("ssh", sshArgs...).CombinedOutput()
+}
+
+func ensureTopicWithRemoteCLI(tb testing.TB, env map[string]string, broker, topic string) bool {
+	tb.Helper()
+
+	command := fmt.Sprintf(
+		"docker exec tcp-over-kafka-broker /opt/kafka/bin/kafka-topics.sh --bootstrap-server 127.0.0.1:%s --create --if-not-exists --topic %q --partitions 1 --replication-factor 1",
+		brokerPort(broker),
+		topic,
+	)
+	output, err := remoteBrokerExec(env, command)
+	if err != nil {
+		tb.Logf("remote broker topic creation failed: %v: %s", err, strings.TrimSpace(string(output)))
+		return false
+	}
+	return true
+}
+
 func ensureTopic(tb testing.TB, broker, topic string) {
 	tb.Helper()
+	env := loadProjectEnv(tb)
 
 	conn, err := kafka.DialContext(context.Background(), "tcp", broker)
 	if err != nil {
@@ -95,22 +173,28 @@ func ensureTopic(tb testing.TB, broker, topic string) {
 	defer conn.Close()
 
 	controller, err := conn.Controller()
-	if err != nil {
-		tb.Fatalf("controller: %v", err)
+	if err == nil {
+		controllerConn, dialErr := kafka.Dial("tcp", net.JoinHostPort(controller.Host, fmt.Sprint(controller.Port)))
+		if dialErr == nil {
+			defer controllerConn.Close()
+			err = controllerConn.CreateTopics(kafka.TopicConfig{
+				Topic:             topic,
+				NumPartitions:     1,
+				ReplicationFactor: 1,
+			})
+			if err == nil || strings.Contains(err.Error(), "Topic with this name already exists") {
+				err = nil
+			}
+		} else {
+			err = dialErr
+		}
 	}
-	controllerConn, err := kafka.Dial("tcp", net.JoinHostPort(controller.Host, fmt.Sprint(controller.Port)))
 	if err != nil {
-		tb.Fatalf("dial controller: %v", err)
-	}
-	defer controllerConn.Close()
-
-	err = controllerConn.CreateTopics(kafka.TopicConfig{
-		Topic:             topic,
-		NumPartitions:     1,
-		ReplicationFactor: 1,
-	})
-	if err != nil && !strings.Contains(err.Error(), "Topic with this name already exists") {
-		tb.Fatalf("create topic %s: %v", topic, err)
+		if !ensureTopicWithRemoteCLI(tb, env, broker, topic) {
+			tb.Fatalf("controller: %v", err)
+		}
+		time.Sleep(500 * time.Millisecond)
+		return
 	}
 
 	for i := 0; i < 20; i++ {

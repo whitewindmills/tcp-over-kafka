@@ -26,6 +26,9 @@ remote_node_config_path="$(node_config_path_for node-a)"
 binary_path="${TCP_OVER_KAFKA_BINARY:-${PROJECT_ROOT}/bin/tcp-over-kafka}"
 tunnel_runtime_image="${TUNNEL_RUNTIME_IMAGE:-gcr.io/distroless/static-debian12}"
 hello_https_container_image="${HELLO_HTTPS_CONTAINER_IMAGE:-python:3.12-slim}"
+kubernetes_runtime_image="$(tunnel_runtime_image)"
+fixture_container_image="$(tunnel_fixture_image)"
+k8s_images_published=0
 
 ssh_cmd=(ssh)
 scp_cmd=(scp)
@@ -50,6 +53,18 @@ else
 	ssh_args=(-o BatchMode=yes)
 fi
 
+ssh_common_opts=(
+	-o StrictHostKeyChecking=no
+	-o UserKnownHostsFile=/dev/null
+	-o LogLevel=ERROR
+)
+
+scp_common_opts=(
+	-o StrictHostKeyChecking=no
+	-o UserKnownHostsFile=/dev/null
+	-o LogLevel=ERROR
+)
+
 # remote_spec returns user@host for an SSH-managed component.
 remote_spec() {
 	local target=$1
@@ -60,7 +75,7 @@ remote_spec() {
 remote_exec() {
 	local remote=$1
 	local command=$2
-	"${ssh_cmd[@]}" "${ssh_args[@]}" "$remote" "$command"
+	"${ssh_cmd[@]}" "${ssh_args[@]}" "${ssh_common_opts[@]}" "$remote" "$command"
 }
 
 # copy_remote_file stages a local file to a remote destination with a mode.
@@ -72,8 +87,48 @@ copy_remote_file() {
 	local tmp
 	tmp="/tmp/$(basename "$dst").$$"
 
-	"${scp_cmd[@]}" "${ssh_args[@]}" "$src" "${remote}:${tmp}"
+	"${scp_cmd[@]}" "${ssh_args[@]}" "${scp_common_opts[@]}" "$src" "${remote}:${tmp}"
 	remote_exec "$remote" "install -D -m ${mode} '${tmp}' '${dst}' && rm -f '${tmp}'"
+}
+
+# stage_remote_container_image pulls a container image locally, copies it to a
+# remote host, and loads it there so the remote runtime does not need registry access.
+stage_remote_container_image() {
+	local remote=$1
+	local image=$2
+	local archive remote_archive
+
+	require_command docker
+	require_command gzip
+
+	archive="$(mktemp "${TMPDIR:-/tmp}/tcp-over-kafka-image.XXXXXX.tar.gz")"
+	remote_archive="/tmp/$(basename "${archive}")"
+
+	docker pull "${image}"
+	docker save "${image}" | gzip -1 >"${archive}"
+	"${scp_cmd[@]}" "${ssh_args[@]}" "${scp_common_opts[@]}" "${archive}" "${remote}:${remote_archive}"
+	remote_exec "$remote" "gzip -dc '${remote_archive}' | docker load >/dev/null && rm -f '${remote_archive}'"
+	rm -f "${archive}"
+}
+
+# publish_kubernetes_images builds and pushes the runtime and fixture images once.
+publish_kubernetes_images() {
+	local build_version
+
+	if [ "${k8s_images_published}" -eq 1 ]; then
+		return 0
+	fi
+
+	require_command docker
+	build_version="${KUBERNETES_IMAGE_BUILD_VERSION:-$(date -u +%Y%m%d%H%M%S)}"
+	export KUBERNETES_IMAGE_BUILD_VERSION="${build_version}"
+
+	docker build --build-arg VERSION="${build_version}" -t "${kubernetes_runtime_image}" "${PROJECT_ROOT}"
+	docker push "${kubernetes_runtime_image}"
+	docker build --build-arg VERSION="${build_version}" -f "${PROJECT_ROOT}/hack/Dockerfile.fixture" -t "${fixture_container_image}" "${PROJECT_ROOT}"
+	docker push "${fixture_container_image}"
+
+	k8s_images_published=1
 }
 
 # prepare_remote_dirs creates the directories used by systemd and docker deploys.
@@ -135,13 +190,21 @@ retire_legacy_node_containers() {
 # retire_legacy_node_kubernetes deletes the old split-role kubernetes resources
 # before the symmetric node deployments are applied.
 retire_legacy_node_kubernetes() {
+	local node=$1
 	local namespace
-	namespace="${KUBERNETES_NAMESPACE:-tcp-over-kafka}"
-	if ! kubectl get namespace "${namespace}" >/dev/null 2>&1; then
+	namespace="$(k8s_namespace_for "$node")"
+	if ! k8s_kubectl "$node" get namespace "${namespace}" >/dev/null 2>&1; then
 		return 0
 	fi
-	kubectl --namespace "${namespace}" delete deployment tcp-over-kafka-client tcp-over-kafka-server --ignore-not-found >/dev/null
-	kubectl --namespace "${namespace}" delete configmap tcp-over-kafka-hello-script --ignore-not-found >/dev/null
+	k8s_kubectl "$node" delete deployment tcp-over-kafka-client tcp-over-kafka-server --ignore-not-found >/dev/null
+	k8s_kubectl "$node" delete configmap tcp-over-kafka-hello-script --ignore-not-found >/dev/null
+}
+
+# wait_for_kubernetes_deployment blocks until the named deployment reports ready.
+wait_for_kubernetes_deployment() {
+	local target=$1
+	local deployment=$2
+	k8s_kubectl "$target" rollout status "deployment/${deployment}" --timeout="${KUBERNETES_ROLLOUT_TIMEOUT:-180s}"
 }
 
 # deploy_systemd_broker installs and enables the broker unit.
@@ -153,6 +216,7 @@ deploy_systemd_broker() {
 	copy_remote_file "$remote" "${SCRIPT_DIR}/run-broker.sh" "${remote_libexec_dir}/run-broker.sh" 0755
 	copy_remote_file "$remote" "${SCRIPT_DIR}/stop-broker.sh" "${remote_libexec_dir}/stop-broker.sh" 0755
 	copy_remote_file "$remote" "${PROJECT_ROOT}/deploy/systemd/tcp-over-kafka-broker.service" "${remote_systemd_dir}/tcp-over-kafka-broker.service" 0644
+	remote_exec "$remote" "docker rm -f tcp-over-kafka-broker >/dev/null 2>&1 || true"
 	reload_systemd "$remote" "tcp-over-kafka-broker"
 }
 
@@ -195,28 +259,42 @@ deploy_systemd_node() {
 
 # deploy_docker_broker runs the broker as a managed docker container.
 deploy_docker_broker() {
-	local remote broker_host broker_port
+	local remote broker_host broker_port broker_data_dir broker_image cluster_id
 	remote="$(remote_spec broker)"
 	prepare_remote_dirs "$remote"
 	broker_host=
 	broker_port=
 	split_host_port "${BROKER_ADDR}" broker_host broker_port
-
+	broker_data_dir="$(broker_data_dir_for_mode docker)"
+	broker_image="$(broker_container_image)"
+	cluster_id="$(broker_kraft_cluster_id)"
 	local broker_cmd=(
 		docker run -d --name tcp-over-kafka-broker --restart unless-stopped --network host
-		-v "${BROKER_DATA_DIR}:/var/lib/redpanda/data"
-		"${BROKER_IMAGE}"
-		redpanda start
-		--mode dev-container
-		--check=false
-		--node-id 0
-		--kafka-addr "internal://0.0.0.0:${broker_port},external://0.0.0.0:${broker_port}"
-		--advertise-kafka-addr "internal://127.0.0.1:${broker_port},external://${broker_host}:${broker_port}"
-		--rpc-addr "0.0.0.0:${BROKER_RPC_PORT:-33145}"
-		--advertise-rpc-addr "${broker_host}:${BROKER_RPC_PORT:-33145}"
+		--user 0:0
+		-v "${broker_data_dir}:/var/lib/kafka/data:Z"
+		-e CLUSTER_ID="${cluster_id}"
+		-e KAFKA_NODE_ID=1
+		-e KAFKA_PROCESS_ROLES=broker,controller
+		-e KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+		-e KAFKA_ADVERTISED_LISTENERS="PLAINTEXT://${broker_host}:${broker_port}"
+		-e KAFKA_LISTENERS="PLAINTEXT://:${broker_port},CONTROLLER://127.0.0.1:9093"
+		-e KAFKA_INTER_BROKER_LISTENER_NAME=PLAINTEXT
+		-e KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER
+		-e KAFKA_CONTROLLER_QUORUM_VOTERS=1@127.0.0.1:9093
+		-e KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1
+		-e KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS=0
+		-e KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1
+		-e KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1
+		-e KAFKA_SHARE_COORDINATOR_STATE_TOPIC_REPLICATION_FACTOR=1
+		-e KAFKA_SHARE_COORDINATOR_STATE_TOPIC_MIN_ISR=1
+		-e KAFKA_LOG_DIRS=/var/lib/kafka/data
+		"${broker_image}"
 	)
 
-	remote_exec "$remote" "docker rm -f tcp-over-kafka-broker >/dev/null 2>&1 || true; install -d '${BROKER_DATA_DIR}'; $(shell_join "${broker_cmd[@]}")"
+	stage_remote_container_image "$remote" "$broker_image"
+
+	remote_exec "$remote" "systemctl disable --now tcp-over-kafka-broker >/dev/null 2>&1 || true; systemctl reset-failed tcp-over-kafka-broker >/dev/null 2>&1 || true; docker rm -f tcp-over-kafka-broker >/dev/null 2>&1 || true; docker rm -f tcp-over-kafka-zookeeper >/dev/null 2>&1 || true; install -d '${broker_data_dir}'; rm -rf '${broker_data_dir}'/*; chown -R 0:0 '${broker_data_dir}'; $(shell_join "${broker_cmd[@]}")"
+	remote_exec "$remote" "for i in \$(seq 1 30); do ss -ltn | awk '\$4 ~ /:${broker_port}\$/ && \$1 == \"LISTEN\" { found=1 } END { exit(found ? 0 : 1) }' && exit 0; sleep 1; done; docker logs --tail 80 tcp-over-kafka-broker >&2; exit 1"
 }
 
 # deploy_docker_node runs the HTTPS helper and node runtime in docker containers.
@@ -254,24 +332,35 @@ deploy_docker_node() {
 	)
 
 	retire_legacy_node_containers "$remote"
+	stage_remote_container_image "$remote" "$hello_https_container_image"
+	stage_remote_container_image "$remote" "$tunnel_runtime_image"
 	remote_exec "$remote" "docker rm -f tcp-over-kafka-node >/dev/null 2>&1 || true; $(shell_join "${hello_cmd[@]}"); $(shell_join "${node_cmd[@]}")"
 }
 
 # deploy_kubernetes_component applies manifests for a component to the active cluster.
 deploy_kubernetes_component() {
 	local target=$1
-	require_command kubectl
+	require_kubernetes_component_prereqs "$target"
 	case "$target" in
 	node-a|node-b)
-		local remote
-		remote="$(remote_spec "$target")"
-		prepare_remote_dirs "$remote"
-		install_tunnel_binary "$remote"
-		install_node_config "$remote" "$target"
-		retire_legacy_node_kubernetes
+		publish_kubernetes_images
+		retire_legacy_node_kubernetes "$target"
+		;;
+	broker)
+		;;
+	*)
+		die "unknown kubernetes target: ${target}"
 		;;
 	esac
-	bash "${SCRIPT_DIR}/render-kubernetes.sh" "$target" | kubectl apply -f -
+	bash "${SCRIPT_DIR}/render-kubernetes.sh" "$target" | k8s_kubectl "$target" apply -f -
+	case "$target" in
+	node-a|node-b)
+		wait_for_kubernetes_deployment "$target" "$(k8s_node_service_name "$target")"
+		;;
+	broker)
+		wait_for_kubernetes_deployment broker tcp-over-kafka-broker
+		;;
+	esac
 }
 
 # deploy_component dispatches to the requested deployment mode.

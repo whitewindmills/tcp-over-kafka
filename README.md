@@ -17,6 +17,9 @@ file transfer across the real environment.
 
 ![Architecture Diagram](./docs/new-arch.png)
 
+For a visual, request-level walkthrough of how one proxied connection moves
+through the runtime, open [docs/request-proxy-flow.html](./docs/request-proxy-flow.html).
+
 ## Architecture
 
 ### Topology
@@ -210,13 +213,35 @@ The deploy scripts render two kinds of remote artifacts:
   HTTPS helper
 - one node JSON config per node
 
+For the dual-cluster Kubernetes path, the repo now keeps three independent
+deployment contexts:
+
+- the broker stays Docker-managed on `BROKER_SSH_HOST`
+- `node-a` uses `NODE_A_KUBECONFIG` and `NODE_A_KUBERNETES_NAMESPACE`
+- `node-b` uses `NODE_B_KUBECONFIG` and `NODE_B_KUBERNETES_NAMESPACE`
+
+Cross-cluster route rendering no longer depends on peer Service DNS names. The
+default logical route hosts are:
+
+- `node-a.tcp-over-kafka.internal`
+- `node-b.tcp-over-kafka.internal`
+
+Those names are only used inside the tunnel route map. The local Kubernetes
+Service DNS names remain in use for in-cluster readiness checks and for each
+runner Pod to reach its own local node service.
+
+The broker implementation depends on the broker deploy mode:
+
+- `systemd` uses the Redpanda wrapper from `./hack/run-broker.sh`
+- `docker` and `kubernetes` run Kafka in single-node KRaft mode
+
 Supported deployment modes:
 
 | Mode | Command | Notes |
 | --- | --- | --- |
-| `systemd` | `make deploy-all` or `make deploy-systemd` | Installs units, helper scripts, and rendered configs on the target hosts. |
-| `docker` | `make deploy-docker` | Runs the broker and node workloads as long-lived Docker containers. |
-| `kubernetes` | `make deploy-kubernetes` | Renders manifests with `./hack/render-kubernetes.sh` and applies them with `kubectl`. |
+| `systemd` | `make deploy-all` or `make deploy-systemd` | Installs units, helper scripts, and rendered configs on the target hosts. The broker path stays on Redpanda. |
+| `docker` | `make deploy-docker` | Runs the Kafka broker and node workloads as long-lived Docker containers. |
+| `kubernetes` | `make deploy-kubernetes` | Renders manifests with `./hack/render-kubernetes.sh` and applies them with `kubectl`. The broker manifest uses Kafka in KRaft mode, while node manifests are cluster-native Deployments and Services. |
 | `external` | `make deploy-all` with `BROKER_DEPLOY_MODE=external` | Leaves an already-running broker in place and only validates that it is reachable. |
 
 Migration protections are built into the deploy path:
@@ -227,8 +252,8 @@ Migration protections are built into the deploy path:
   the node workload
 - the Kubernetes node deploy deletes the old split-role deployments before
   applying the new manifests
-- the Kubernetes node manifests require anti-affinity so both host-networked
-  node pods cannot land on the same worker and fight over the same ports
+- the Kubernetes node deploy no longer depends on SSHing into Kubernetes
+  workers or mounting host-local tunnel binaries into Pods
 
 ## Quick Start
 
@@ -262,10 +287,25 @@ Edit `./hack/.env.local` to match your target environment. The checked-in file
 already documents the expected variables for:
 
 - broker host and deployment mode
-- node A and node B SSH hosts
-- per-node routes and service maps
+- broker images for the systemd Redpanda path and the Docker/Kubernetes Kafka path
+- the cluster-pullable tunnel runtime and fixture images used by the Kubernetes node path
+- node A and node B SSH hosts, which remain logical node identity defaults and
+  legacy non-Kubernetes host inputs
+- local kubeconfig copies for node A and node B
+- optional node-specific Kubernetes namespaces
+- per-node routes and service maps, including the synthetic logical route hosts
 - HTTPS helper settings
 - E2E validation settings
+
+Before running the dual-cluster Kubernetes workflow, prepare the local API
+hostname mappings required by the kubeconfigs:
+
+- `10.255.88.236 api-int.ceakedev88232.cesclusterdev232.cn`
+- `10.255.69.77 api-int.test6973.ceacube.cn`
+
+Cluster selection for the dual-cluster node path comes from
+`NODE_A_KUBECONFIG` and `NODE_B_KUBECONFIG`, not from `NODE_A_SSH_HOST` or
+`NODE_B_SSH_HOST`.
 
 ### Deploy
 
@@ -288,6 +328,44 @@ NODE_B_DEPLOY_MODE=docker \
 make deploy-all
 ```
 
+Docker validation with the checked-in `apache/kafka:3.9.2` broker image uses:
+
+```bash
+BROKER_DEPLOY_MODE=docker \
+NODE_A_DEPLOY_MODE=docker \
+NODE_B_DEPLOY_MODE=docker \
+make deploy-all
+```
+
+Remote Docker broker deploys pull the broker image on the local workstation and
+copy it to the broker host before `docker load`, so the broker host does not
+need direct registry access.
+
+For the mixed path where the broker stays on Docker and both nodes run in
+Kubernetes, publish the cluster images first or let `make deploy-all` build and
+push them through the deploy script:
+
+```bash
+BROKER_DEPLOY_MODE=docker \
+NODE_A_DEPLOY_MODE=kubernetes \
+NODE_B_DEPLOY_MODE=kubernetes \
+make deploy-all
+```
+
+The Kubernetes node path expects:
+
+- `KUBERNETES_TUNNEL_RUNTIME_IMAGE` to point at a cluster-pullable image for the
+  `tcp-over-kafka` binary, for example
+  `image.cestc.cn/ccos-test/tcp-over-kafka:latest`
+- `TUNNEL_FIXTURE_IMAGE` to point at the helper image used for the SSH target,
+  HTTPS target, and in-cluster E2E runner
+- `NODE_A_KUBECONFIG` and `NODE_B_KUBECONFIG` to point at locally prepared
+  kubeconfig files for the two clusters
+- `NODE_A_KUBERNETES_NAMESPACE` and `NODE_B_KUBERNETES_NAMESPACE` to be set
+  when the two clusters should not share the same namespace value
+- `HELLO_HTTPS_CERT` and `HELLO_HTTPS_KEY` to exist locally so they can be
+  rendered into Kubernetes `Secret` objects
+
 ## Validation
 
 The shell E2E suite runs against the real environment from `./hack/.env.local`.
@@ -297,13 +375,48 @@ make e2e-test
 make e2e-test-ssh
 make e2e-test-https
 make e2e-test-file
+make e2e-test-concurrency
 ```
+
+For the Docker validation path with `apache/kafka:3.9.2`,
+deploy first and then run the suite:
+
+```bash
+BROKER_DEPLOY_MODE=docker \
+NODE_A_DEPLOY_MODE=docker \
+NODE_B_DEPLOY_MODE=docker \
+make deploy-all
+make e2e-test
+```
+
+For the mixed Docker broker plus Kubernetes nodes path, the shell E2E scripts
+automatically re-execute inside Kubernetes runner Pods so the SOCKS, SSH, and
+HTTPS traffic stays inside the cluster network:
+
+```bash
+BROKER_DEPLOY_MODE=docker \
+NODE_A_DEPLOY_MODE=kubernetes \
+NODE_B_DEPLOY_MODE=kubernetes \
+make deploy-all
+make e2e-test
+make e2e-test-concurrency
+```
+
+That validation path now launches one runner Pod in each cluster:
+
+- the runner in node A’s cluster executes only `node-a -> node-b`
+- the runner in node B’s cluster executes only `node-b -> node-a`
+
+This keeps local SOCKS access on cluster-local Service DNS while still
+exercising the logical cross-cluster route hostnames.
 
 The suite validates:
 
 - SSH through node A to node B and through node B to node A
 - HTTPS through both directions
 - file transfer integrity in both directions
+- the documented SSH and HTTPS concurrency sweeps when using
+  `make e2e-test-concurrency`
 
 Validation runbooks:
 

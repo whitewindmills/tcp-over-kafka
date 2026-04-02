@@ -19,6 +19,13 @@ class HelloHandler(http.server.BaseHTTPRequestHandler):
         sys.stderr.write("%s - - [%s] %s\n" % (self.client_address[0], self.log_date_time_string(), fmt % args))
 
 
+class HelloHTTPServer(http.server.ThreadingHTTPServer):
+    # The concurrency sweep fans out multiple TLS probes in parallel; Python's
+    # default request queue of 5 is too small and causes connect timeouts.
+    request_queue_size = 128
+    daemon_threads = True
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--bind", default="0.0.0.0")
@@ -27,7 +34,7 @@ def main():
     parser.add_argument("--key", required=True)
     args = parser.parse_args()
 
-    server = http.server.ThreadingHTTPServer((args.bind, args.port), HelloHandler)
+    server = HelloHTTPServer((args.bind, args.port), HelloHandler)
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain(certfile=args.cert, keyfile=args.key)
     server.socket = context.wrap_socket(server.socket, server_side=True)

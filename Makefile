@@ -14,7 +14,7 @@ BROKER_DEPLOY_MODE ?= $(DEPLOY_MODE)
 NODE_A_DEPLOY_MODE ?= $(DEPLOY_MODE)
 NODE_B_DEPLOY_MODE ?= $(DEPLOY_MODE)
 
-.PHONY: all fmt vet test build vendor clean docker-build deploy-broker deploy-node-a deploy-node-b deploy-all deploy-systemd deploy-docker deploy-kubernetes e2e-test e2e-test-ssh e2e-test-https e2e-test-file
+.PHONY: all fmt vet test build vendor clean docker-build deploy-broker deploy-node-a deploy-node-b deploy-all deploy-systemd deploy-docker deploy-kubernetes e2e-test e2e-test-ssh e2e-test-https e2e-test-file e2e-test-concurrency
 
 all: test build
 
@@ -72,6 +72,9 @@ e2e-test-https:
 
 e2e-test-file:
 	bash ./hack/test/file-transfer.sh
+
+e2e-test-concurrency:
+	bash ./hack/test/concurrency.sh
 
 e2e-test:
 	bash ./hack/test/run-all.sh
