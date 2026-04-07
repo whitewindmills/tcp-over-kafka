@@ -14,6 +14,11 @@ BROKER_DEPLOY_MODE ?= $(DEPLOY_MODE)
 NODE_A_DEPLOY_MODE ?= $(DEPLOY_MODE)
 NODE_B_DEPLOY_MODE ?= $(DEPLOY_MODE)
 
+DEPLOY_MODE_ENV := $(if $(filter command line environment,$(origin DEPLOY_MODE)),DEPLOY_MODE=$(DEPLOY_MODE))
+BROKER_DEPLOY_MODE_ENV := $(if $(filter command line environment,$(origin BROKER_DEPLOY_MODE)),BROKER_DEPLOY_MODE=$(BROKER_DEPLOY_MODE))
+NODE_A_DEPLOY_MODE_ENV := $(if $(filter command line environment,$(origin NODE_A_DEPLOY_MODE)),NODE_A_DEPLOY_MODE=$(NODE_A_DEPLOY_MODE))
+NODE_B_DEPLOY_MODE_ENV := $(if $(filter command line environment,$(origin NODE_B_DEPLOY_MODE)),NODE_B_DEPLOY_MODE=$(NODE_B_DEPLOY_MODE))
+
 .PHONY: all fmt vet test build vendor clean docker-build deploy-broker deploy-node-a deploy-node-b deploy-all deploy-systemd deploy-docker deploy-kubernetes e2e-test e2e-test-ssh e2e-test-https e2e-test-file e2e-test-concurrency
 
 all: test build
@@ -40,19 +45,19 @@ docker-build:
 	docker build --build-arg VERSION="$(VERSION)" -t tcp-over-kafka:$(VERSION) .
 
 deploy-broker:
-	BROKER_DEPLOY_MODE=$(BROKER_DEPLOY_MODE) bash ./hack/deploy-remote.sh broker
+	$(BROKER_DEPLOY_MODE_ENV) bash ./hack/deploy-remote.sh broker
 
 deploy-node-a: $(BIN)
-	NODE_A_DEPLOY_MODE=$(NODE_A_DEPLOY_MODE) TCP_OVER_KAFKA_BINARY=$(BIN) bash ./hack/deploy-remote.sh node-a
+	$(NODE_A_DEPLOY_MODE_ENV) TCP_OVER_KAFKA_BINARY=$(BIN) bash ./hack/deploy-remote.sh node-a
 
 deploy-node-b: $(BIN)
-	NODE_B_DEPLOY_MODE=$(NODE_B_DEPLOY_MODE) TCP_OVER_KAFKA_BINARY=$(BIN) bash ./hack/deploy-remote.sh node-b
+	$(NODE_B_DEPLOY_MODE_ENV) TCP_OVER_KAFKA_BINARY=$(BIN) bash ./hack/deploy-remote.sh node-b
 
 deploy-all: $(BIN)
-	DEPLOY_MODE=$(DEPLOY_MODE) \
-	BROKER_DEPLOY_MODE=$(BROKER_DEPLOY_MODE) \
-	NODE_A_DEPLOY_MODE=$(NODE_A_DEPLOY_MODE) \
-	NODE_B_DEPLOY_MODE=$(NODE_B_DEPLOY_MODE) \
+	$(DEPLOY_MODE_ENV) \
+	$(BROKER_DEPLOY_MODE_ENV) \
+	$(NODE_A_DEPLOY_MODE_ENV) \
+	$(NODE_B_DEPLOY_MODE_ENV) \
 	TCP_OVER_KAFKA_BINARY=$(BIN) bash ./hack/deploy-remote.sh all
 
 deploy-systemd:

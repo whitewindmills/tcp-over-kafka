@@ -36,33 +36,33 @@ func (s *serverSession) close() {
 }
 
 // serverOpenSession dials the registered local target and registers one inbound session.
-func serverOpenSession(ctx context.Context, bus tunnelBus, sessions *serverRegistry, platformID string, services map[string]string, maxFrame int, dialContext dialContextFunc, f frame.Frame) error {
+func serverOpenSession(ctx context.Context, bus tunnelBus, sessions *serverRegistry, nid string, services map[string]string, maxFrame int, dialContext dialContextFunc, f frame.Frame) error {
 	if sessions.getFrame(f) != nil {
 		return nil
 	}
-	targetAddr, ok := resolveServerService(services, f.DestinationDeviceID)
+	targetAddr, ok := resolveServerService(services, f.DestinationEID)
 	if !ok {
-		return fmt.Errorf("unknown destination: %q", f.DestinationDeviceID)
+		return fmt.Errorf("unknown destination: %q", f.DestinationEID)
 	}
 	conn, err := dialContext(ctx, "tcp", targetAddr)
 	if err != nil {
 		return fmt.Errorf("dial target %s: %w", targetAddr, err)
 	}
 	sess := &serverSession{
-		client:       Endpoint{PlatformID: f.SourcePlatformID, DeviceID: f.SourceDeviceID},
-		service:      Endpoint{PlatformID: platformID, DeviceID: f.DestinationDeviceID},
+		client:       Endpoint{NID: f.SourceNID, EID: f.SourceEID},
+		service:      Endpoint{NID: nid, EID: f.DestinationEID},
 		connectionID: f.ConnectionID,
 		conn:         conn,
 		closed:       make(chan struct{}),
 	}
 	sessions.add(sess)
 	if err := bus.Send(ctx, frame.Frame{
-		Kind:                  frame.KindOpenAck,
-		SourcePlatformID:      sess.service.PlatformID,
-		SourceDeviceID:        sess.service.DeviceID,
-		DestinationPlatformID: sess.client.PlatformID,
-		DestinationDeviceID:   sess.client.DeviceID,
-		ConnectionID:          f.ConnectionID,
+		Kind:           frame.KindOpenAck,
+		SourceNID:      sess.service.NID,
+		SourceEID:      sess.service.EID,
+		DestinationNID: sess.client.NID,
+		DestinationEID: sess.client.EID,
+		ConnectionID:   f.ConnectionID,
 	}); err != nil {
 		sess.close()
 		sessions.remove(sess.client, sess.service, f.ConnectionID)
@@ -91,13 +91,13 @@ func serverPumpOutbound(ctx context.Context, bus tunnelBus, sessions *serverRegi
 		if n > 0 {
 			payload := append([]byte(nil), buf[:n]...)
 			if err := bus.Send(ctx, frame.Frame{
-				Kind:                  frame.KindData,
-				SourcePlatformID:      sess.service.PlatformID,
-				SourceDeviceID:        sess.service.DeviceID,
-				DestinationPlatformID: sess.client.PlatformID,
-				DestinationDeviceID:   sess.client.DeviceID,
-				ConnectionID:          sess.connectionID,
-				Payload:               payload,
+				Kind:           frame.KindData,
+				SourceNID:      sess.service.NID,
+				SourceEID:      sess.service.EID,
+				DestinationNID: sess.client.NID,
+				DestinationEID: sess.client.EID,
+				ConnectionID:   sess.connectionID,
+				Payload:        payload,
 			}); err != nil {
 				klog.Errorf("Server send failed: %v", err)
 				sess.close()
@@ -109,12 +109,12 @@ func serverPumpOutbound(ctx context.Context, bus tunnelBus, sessions *serverRegi
 				klog.Errorf("Target read failed: %v", err)
 			}
 			_ = bus.Send(context.Background(), frame.Frame{
-				Kind:                  frame.KindClose,
-				SourcePlatformID:      sess.service.PlatformID,
-				SourceDeviceID:        sess.service.DeviceID,
-				DestinationPlatformID: sess.client.PlatformID,
-				DestinationDeviceID:   sess.client.DeviceID,
-				ConnectionID:          sess.connectionID,
+				Kind:           frame.KindClose,
+				SourceNID:      sess.service.NID,
+				SourceEID:      sess.service.EID,
+				DestinationNID: sess.client.NID,
+				DestinationEID: sess.client.EID,
+				ConnectionID:   sess.connectionID,
 			})
 			sess.close()
 			return
@@ -155,8 +155,8 @@ func (r *serverRegistry) get(client, service Endpoint, connectionID string) *ser
 // getFrame looks up a session by frame identity.
 func (r *serverRegistry) getFrame(f frame.Frame) *serverSession {
 	return r.get(
-		Endpoint{PlatformID: f.SourcePlatformID, DeviceID: f.SourceDeviceID},
-		Endpoint{PlatformID: f.DestinationPlatformID, DeviceID: f.DestinationDeviceID},
+		Endpoint{NID: f.SourceNID, EID: f.SourceEID},
+		Endpoint{NID: f.DestinationNID, EID: f.DestinationEID},
 		f.ConnectionID,
 	)
 }
@@ -171,8 +171,8 @@ func (r *serverRegistry) remove(client, service Endpoint, connectionID string) {
 // removeFrame deletes a session using a frame identity.
 func (r *serverRegistry) removeFrame(f frame.Frame) {
 	r.remove(
-		Endpoint{PlatformID: f.SourcePlatformID, DeviceID: f.SourceDeviceID},
-		Endpoint{PlatformID: f.DestinationPlatformID, DeviceID: f.DestinationDeviceID},
+		Endpoint{NID: f.SourceNID, EID: f.SourceEID},
+		Endpoint{NID: f.DestinationNID, EID: f.DestinationEID},
 		f.ConnectionID,
 	)
 }

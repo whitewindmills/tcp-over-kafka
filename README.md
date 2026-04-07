@@ -7,8 +7,8 @@ symmetric node model:
 - every deployed node runs the same `tcp-over-kafka node` runtime
 - every node exposes a local SOCKS5 listener for outbound traffic
 - every node subscribes to the shared Kafka topic with its own consumer group
-- every node can also expose local services addressed by `platformID` and
-  `deviceID`
+- every node can also expose local services addressed by `nid` and
+  `eid`
 
 The current deployment and validation flow is intentionally deterministic and
 repo-driven. Configuration starts in `./hack/.env.local`, deploy scripts render
@@ -35,26 +35,29 @@ public split between a dedicated client process and a dedicated server process.
 
 Each node owns:
 
-- one `platformID`, usually derived from the node identity such as its IP
+- one `nid`, usually derived from the node identity such as its IP
   address
 - one local SOCKS5 listen address for outbound TCP requests
-- one explicit route map from `host:port` to a remote `platformID/deviceID`
-- one explicit service map from `deviceID` to a local `host:port`
+- one explicit route map from `host:port` to a remote `nid/eid`
+- one explicit service map from `eid` to a local `host:port`
 
 ### Identity And Addressing
 
 The tunnel routes traffic using two levels of identity:
 
-- `platformID`: identifies the remote node
-- `deviceID`: identifies the service exposed on that node
+- `nid`: identifies the remote node
+- `eid`: identifies the service exposed on that node
 
 Examples:
 
-- `10.253.15.168 / ssh`
-- `10.253.15.168 / web`
+- `10.253.15.168 / 22`
+- `10.253.15.168 / 443`
+
+In the checked-in deployment defaults, `nid` uses the remote service IP or
+domain name and `eid` uses the remote service port string.
 
 Outbound SOCKS traffic always originates from the fixed internal source
-`deviceID` `proxy`. That keeps reply routing deterministic without exposing an
+`eid` `proxy`. That keeps reply routing deterministic without exposing an
 extra operator-facing identifier.
 
 ### Routing Model
@@ -62,15 +65,15 @@ extra operator-facing identifier.
 Each node has two independent maps:
 
 - `routes`
-  Maps an outbound `host:port` request to the remote `platformID/deviceID`
+  Maps an outbound `host:port` request to the remote `nid/eid`
   destination that should receive the tunnel session.
 - `services`
-  Maps an inbound `deviceID` to a local TCP target on the current node.
+  Maps an inbound `eid` to a local TCP target on the current node.
 
 Example:
 
-- route `10.253.15.168:22 -> { platformID: "10.253.15.168", deviceID: "ssh" }`
-- service `ssh -> 127.0.0.1:22`
+- route `10.253.15.168:22 -> { nid: "10.253.15.168", eid: "22" }`
+- service `22 -> 127.0.0.1:22`
 
 This means node A can open a SOCKS session to node B’s SSH service, and node B
 can do the same back to node A, using the same runtime and the same wire model.
@@ -78,8 +81,8 @@ can do the same back to node A, using the same runtime and the same wire model.
 ### Kafka Transport
 
 The transport uses one shared topic for all sessions. Every node consumes the
-same topic through a consumer group derived from its own `platformID`, so every
-node sees every message once and filters on `destinationPlatformID`.
+same topic through a consumer group derived from its own `nid`, so every
+node sees every message once and filters on `destinationNID`.
 
 The Kafka message key is the stable conversation key derived from:
 
@@ -96,7 +99,7 @@ The wire format is binary and versioned in `./pkg/frame/`. The main frame kinds
 used by the runtime are:
 
 - `KindOpen`
-  Starts a new logical connection to a remote `platformID/deviceID`.
+  Starts a new logical connection to a remote `nid/eid`.
 - `KindOpenAck`
   Confirms the destination service accepted the request.
 - `KindReady`
@@ -139,22 +142,22 @@ Example:
 {
   "broker": "10.253.15.166:9092",
   "topic": "tcp-over-kafka.single-topic.poc",
-  "platformID": "10.253.15.167",
+  "nid": "10.253.15.167",
   "listen": "0.0.0.0:12345",
   "maxFrameSize": 32768,
   "routes": {
     "10.253.15.168:22": {
-      "platformID": "10.253.15.168",
-      "deviceID": "ssh"
+      "nid": "10.253.15.168",
+      "eid": "22"
     },
     "10.253.15.168:443": {
-      "platformID": "10.253.15.168",
-      "deviceID": "web"
+      "nid": "10.253.15.168",
+      "eid": "443"
     }
   },
   "services": {
-    "ssh": "127.0.0.1:22",
-    "web": "127.0.0.1:443"
+    "22": "127.0.0.1:22",
+    "443": "127.0.0.1:443"
   }
 }
 ```
@@ -165,16 +168,16 @@ Field meanings:
   Kafka broker address used by the node.
 - `topic`
   Shared topic that carries all sessions.
-- `platformID`
+- `nid`
   Unique identity for the current node.
 - `listen`
   Local SOCKS5 listener address.
 - `maxFrameSize`
   Maximum payload bytes copied into one frame.
 - `routes`
-  Outbound target map from `host:port` to remote `platformID/deviceID`.
+  Outbound target map from `host:port` to remote `nid/eid`.
 - `services`
-  Inbound service map from `deviceID` to a local TCP target.
+  Inbound service map from `eid` to a local TCP target.
 
 ### Runtime Flow
 
@@ -190,7 +193,7 @@ Implementation details that matter:
 
 - Kafka readers start at `LastOffset` for new deployments.
 - Unreadable frames are skipped instead of crashing the reader.
-- Consumer groups are derived from `platformID`.
+- Consumer groups are derived from `nid`.
 - The runtime keeps independent outbound and inbound session registries.
 - `KindData` writes now cache the session lookup before dereferencing it, which
   avoids a nil-dereference race during teardown.
@@ -220,6 +223,13 @@ deployment contexts:
 - `node-a` uses `NODE_A_KUBECONFIG` and `NODE_A_KUBERNETES_NAMESPACE`
 - `node-b` uses `NODE_B_KUBECONFIG` and `NODE_B_KUBERNETES_NAMESPACE`
 
+When both logical nodes use Kubernetes, the deploy scripts require explicit
+`NODE_A_KUBECONFIG` and `NODE_B_KUBECONFIG` values. They do not fall back to
+the shared default `~/.kube/config`, because that can silently deploy both
+logical nodes into the same cluster. If both kubeconfigs intentionally target
+the same API server, also pin `NODE_A_K8S_NODE_NAME` and
+`NODE_B_K8S_NODE_NAME` to different workers.
+
 Cross-cluster route rendering no longer depends on peer Service DNS names. The
 default logical route hosts are:
 
@@ -241,7 +251,7 @@ Supported deployment modes:
 | --- | --- | --- |
 | `systemd` | `make deploy-all` or `make deploy-systemd` | Installs units, helper scripts, and rendered configs on the target hosts. The broker path stays on Redpanda. |
 | `docker` | `make deploy-docker` | Runs the Kafka broker and node workloads as long-lived Docker containers. |
-| `kubernetes` | `make deploy-kubernetes` | Renders manifests with `./hack/render-kubernetes.sh` and applies them with `kubectl`. The broker manifest uses Kafka in KRaft mode, while node manifests are cluster-native Deployments and Services. |
+| `kubernetes` | `make deploy-kubernetes` | Renders manifests with `./hack/render-kubernetes.sh`, applies them with `kubectl`, then runs `kubectl rollout restart` so each deploy forces a fresh Pod rollout even when the manifest is unchanged. The broker manifest uses Kafka in KRaft mode, while node manifests are cluster-native Deployments and Services. |
 | `external` | `make deploy-all` with `BROKER_DEPLOY_MODE=external` | Leaves an already-running broker in place and only validates that it is reachable. |
 
 Migration protections are built into the deploy path:
@@ -294,6 +304,8 @@ already documents the expected variables for:
 - local kubeconfig copies for node A and node B
 - optional node-specific Kubernetes namespaces
 - per-node routes and service maps, including the synthetic logical route hosts
+- the default deployment convention where `nid` follows the remote IP or domain
+  and `eid` follows the remote target port
 - HTTPS helper settings
 - E2E validation settings
 
@@ -361,6 +373,9 @@ The Kubernetes node path expects:
   HTTPS target, and in-cluster E2E runner
 - `NODE_A_KUBECONFIG` and `NODE_B_KUBECONFIG` to point at locally prepared
   kubeconfig files for the two clusters
+- if the two kubeconfigs target the same cluster intentionally,
+  `NODE_A_K8S_NODE_NAME` and `NODE_B_K8S_NODE_NAME` must be set to different
+  worker names
 - `NODE_A_KUBERNETES_NAMESPACE` and `NODE_B_KUBERNETES_NAMESPACE` to be set
   when the two clusters should not share the same namespace value
 - `HELLO_HTTPS_CERT` and `HELLO_HTTPS_KEY` to exist locally so they can be

@@ -211,27 +211,27 @@ func TestRouteAndServiceResolution(t *testing.T) {
 
 	routes := map[string]Endpoint{
 		"10.0.0.1:22": {
-			PlatformID: "10.0.0.168",
-			DeviceID:   "sshd",
+			NID: "10.0.0.168",
+			EID: "22",
 		},
 		"10.0.0.2:443": {
-			PlatformID: "10.0.0.168",
-			DeviceID:   "httpsd",
+			NID: "10.0.0.168",
+			EID: "443",
 		},
 	}
 	services := map[string]string{
-		"sshd":   "127.0.0.1:2222",
-		"httpsd": "127.0.0.1:443",
+		"22":  "127.0.0.1:2222",
+		"443": "127.0.0.1:443",
 	}
 
-	if got, ok := resolveClientRoute(routes, "10.0.0.1:22"); !ok || got.DeviceID != "sshd" {
+	if got, ok := resolveClientRoute(routes, "10.0.0.1:22"); !ok || got.EID != "22" {
 		t.Fatalf("route resolution mismatch: ok=%v got=%#v", ok, got)
 	}
 	if _, ok := resolveClientRoute(routes, "10.0.0.9:22"); ok {
 		t.Fatal("expected missing route")
 	}
 
-	if got, ok := resolveServerService(services, "httpsd"); !ok || got != "127.0.0.1:443" {
+	if got, ok := resolveServerService(services, "443"); !ok || got != "127.0.0.1:443" {
 		t.Fatalf("service resolution mismatch: ok=%v got=%q", ok, got)
 	}
 	if _, ok := resolveServerService(services, "missing"); ok {
@@ -242,8 +242,8 @@ func TestRouteAndServiceResolution(t *testing.T) {
 func TestFrameConversationKeyIgnoresDirection(t *testing.T) {
 	t.Parallel()
 
-	left := Endpoint{PlatformID: "10.0.0.167", DeviceID: "client-a"}
-	right := Endpoint{PlatformID: "10.0.0.168", DeviceID: "server-a"}
+	left := Endpoint{NID: "10.0.0.167", EID: "client-a"}
+	right := Endpoint{NID: "10.0.0.168", EID: "server-a"}
 	first := conversationKey(left, right, "conn-1")
 	second := conversationKey(right, left, "conn-1")
 	if first != second {
@@ -334,13 +334,13 @@ func TestKafkaSingleTopicRoundTripFromLocalEnv(t *testing.T) {
 	defer receiver.Close()
 
 	want := frame.Frame{
-		Kind:                  frame.KindOpen,
-		SourcePlatformID:      "10.0.0.167",
-		SourceDeviceID:        "client-proc-42",
-		DestinationPlatformID: "10.0.0.168",
-		DestinationDeviceID:   "server-proc-7",
-		ConnectionID:          "single-topic-connection",
-		Payload:               []byte(`{"sourcePlatformID":"10.0.0.167","sourceDeviceID":"client-proc-42","destinationPlatformID":"10.0.0.168","destinationDeviceID":"server-proc-7"}`),
+		Kind:           frame.KindOpen,
+		SourceNID:      "10.0.0.167",
+		SourceEID:      "client-proc-42",
+		DestinationNID: "10.0.0.168",
+		DestinationEID: "server-proc-7",
+		ConnectionID:   "single-topic-connection",
+		Payload:        []byte(`{"sourceNID":"10.0.0.167","sourceEID":"client-proc-42","destinationNID":"10.0.0.168","destinationEID":"server-proc-7"}`),
 	}
 
 	if err := sender.Send(ctx, want); err != nil {
@@ -354,10 +354,10 @@ func TestKafkaSingleTopicRoundTripFromLocalEnv(t *testing.T) {
 	if got.Kind != want.Kind {
 		t.Fatalf("unexpected frame kind: %v", got.Kind)
 	}
-	if got.SourcePlatformID != want.SourcePlatformID ||
-		got.SourceDeviceID != want.SourceDeviceID ||
-		got.DestinationPlatformID != want.DestinationPlatformID ||
-		got.DestinationDeviceID != want.DestinationDeviceID ||
+	if got.SourceNID != want.SourceNID ||
+		got.SourceEID != want.SourceEID ||
+		got.DestinationNID != want.DestinationNID ||
+		got.DestinationEID != want.DestinationEID ||
 		got.ConnectionID != want.ConnectionID {
 		t.Fatalf("unexpected frame identity: %#v", got)
 	}
@@ -381,21 +381,21 @@ func TestServerOpenSessionReturnsKindErrorForUnknownService(t *testing.T) {
 		done <- nodeReceiveLoop(ctx, serverBus, clientSessions, serverSessions, Config{
 			Broker:       "127.0.0.1:9092",
 			Topic:        "tcp-over-kafka",
-			PlatformID:   "10.0.0.168",
+			NID:          "10.0.0.168",
 			ListenAddr:   "127.0.0.1:12345",
-			Routes:       map[string]Endpoint{"10.0.0.167:22": {PlatformID: "10.0.0.167", DeviceID: "ssh"}},
+			Routes:       map[string]Endpoint{"10.0.0.167:22": {NID: "10.0.0.167", EID: "22"}},
 			Services:     map[string]string{},
 			MaxFrameSize: 128,
 		}, dialerForHandlers(map[string]pipeHandler{}))
 	}()
 
 	err := clientBus.Send(ctx, frame.Frame{
-		Kind:                  frame.KindOpen,
-		SourcePlatformID:      "10.0.0.167",
-		SourceDeviceID:        "client-a",
-		DestinationPlatformID: "10.0.0.168",
-		DestinationDeviceID:   "missing-service",
-		ConnectionID:          "conn-1",
+		Kind:           frame.KindOpen,
+		SourceNID:      "10.0.0.167",
+		SourceEID:      "client-a",
+		DestinationNID: "10.0.0.168",
+		DestinationEID: "missing-service",
+		ConnectionID:   "conn-1",
 	})
 	if err != nil {
 		t.Fatalf("send open: %v", err)

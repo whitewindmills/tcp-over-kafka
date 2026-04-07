@@ -47,12 +47,12 @@ func (s *clientSession) close() {
 
 func (s *clientSession) frame(kind frame.Kind) frame.Frame {
 	return frame.Frame{
-		Kind:                  kind,
-		SourcePlatformID:      s.self.PlatformID,
-		SourceDeviceID:        s.self.DeviceID,
-		DestinationPlatformID: s.peer.PlatformID,
-		DestinationDeviceID:   s.peer.DeviceID,
-		ConnectionID:          s.connectionID,
+		Kind:           kind,
+		SourceNID:      s.self.NID,
+		SourceEID:      s.self.EID,
+		DestinationNID: s.peer.NID,
+		DestinationEID: s.peer.EID,
+		ConnectionID:   s.connectionID,
 	}
 }
 
@@ -224,8 +224,8 @@ func (r *clientRegistry) get(self, peer Endpoint, connectionID string) *clientSe
 // getFrame looks up a session by frame identity.
 func (r *clientRegistry) getFrame(f frame.Frame) *clientSession {
 	return r.get(
-		Endpoint{PlatformID: f.SourcePlatformID, DeviceID: f.SourceDeviceID},
-		Endpoint{PlatformID: f.DestinationPlatformID, DeviceID: f.DestinationDeviceID},
+		Endpoint{NID: f.SourceNID, EID: f.SourceEID},
+		Endpoint{NID: f.DestinationNID, EID: f.DestinationEID},
 		f.ConnectionID,
 	)
 }
@@ -240,8 +240,8 @@ func (r *clientRegistry) remove(self, peer Endpoint, connectionID string) {
 // removeFrame deletes a session using a frame identity.
 func (r *clientRegistry) removeFrame(f frame.Frame) {
 	r.remove(
-		Endpoint{PlatformID: f.SourcePlatformID, DeviceID: f.SourceDeviceID},
-		Endpoint{PlatformID: f.DestinationPlatformID, DeviceID: f.DestinationDeviceID},
+		Endpoint{NID: f.SourceNID, EID: f.SourceEID},
+		Endpoint{NID: f.DestinationNID, EID: f.DestinationEID},
 		f.ConnectionID,
 	)
 }

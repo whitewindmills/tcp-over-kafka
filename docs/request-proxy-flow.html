@@ -1346,7 +1346,7 @@
             and how raw TCP payload starts flowing only after <code>KindReady</code>.
           </p>
           <div class="hero-meta">
-            <span>Example route <code>10.253.15.168:22 -> 10.253.15.168/ssh</code></span>
+            <span>Example route <code>10.253.15.168:22 -> 10.253.15.168/22</code></span>
             <span>One conversation key per <code>connectionID</code></span>
             <span>Payload chunks capped by <code>maxFrameSize</code></span>
           </div>
@@ -1359,8 +1359,8 @@
         <div class="hero-visual">
           <div class="flow-plane">
             <div class="plane-topline">
-              <span><strong>Example session</strong> <code>10.253.15.167/proxy -> 10.253.15.168/ssh</code></span>
-              <span><strong>Stable key</strong> <code>10.253.15.167/proxy|10.253.15.168/ssh|7f3cbfe2d6a41c90</code></span>
+              <span><strong>Example session</strong> <code>10.253.15.167/proxy -> 10.253.15.168/22</code></span>
+              <span><strong>Stable key</strong> <code>10.253.15.167/proxy|10.253.15.168/22|7f3cbfe2d6a41c90</code></span>
             </div>
 
             <div class="plane-network">
@@ -1386,7 +1386,7 @@
                   <small>service dial</small>
                 </div>
                 <div class="station service">
-                  <strong>ssh</strong>
+                  <strong>22</strong>
                   <span>127.0.0.1:22</span>
                   <small>local target</small>
                 </div>
@@ -1419,7 +1419,7 @@
                       <div class="trajectory-packet" style="--delay: -1.7s;">Open / conn 7f3c…</div>
                     </div>
                     <div class="trajectory-note">
-                      <span><strong>Contents</strong> src=<code>10.253.15.167/proxy</code>, dst=<code>10.253.15.168/ssh</code>, payload=<code>none</code></span>
+                      <span><strong>Contents</strong> src=<code>10.253.15.167/proxy</code>, dst=<code>10.253.15.168/22</code>, payload=<code>none</code></span>
                       <span><strong>Trajectory</strong> route hit -> <code>bus.Send</code> -> Kafka hash key -> <code>nodeReceiveLoop</code> on Node B</span>
                     </div>
                   </div>
@@ -1435,7 +1435,7 @@
                       <div class="trajectory-packet" style="--delay: -2.5s;">dial 127.0.0.1:22</div>
                     </div>
                     <div class="trajectory-note">
-                      <span><strong>Contents</strong> service lookup <code>ssh -> 127.0.0.1:22</code>, new inbound session, same <code>connectionID</code></span>
+                      <span><strong>Contents</strong> service lookup <code>22 -> 127.0.0.1:22</code>, new inbound session, same <code>connectionID</code></span>
                       <span><strong>Trajectory</strong> <code>resolveServerService</code> -> <code>dialContext(\"tcp\", \"127.0.0.1:22\")</code></span>
                     </div>
                   </div>
@@ -1451,7 +1451,7 @@
                       <div class="trajectory-packet" style="--delay: -0.6s;">OpenAck / no payload</div>
                     </div>
                     <div class="trajectory-note">
-                      <span><strong>Contents</strong> kind=<code>OpenAck</code>, src=<code>10.253.15.168/ssh</code>, dst=<code>10.253.15.167/proxy</code></span>
+                      <span><strong>Contents</strong> kind=<code>OpenAck</code>, src=<code>10.253.15.168/22</code>, dst=<code>10.253.15.167/proxy</code></span>
                       <span><strong>Trajectory</strong> Node B confirms the target socket is open before Node A replies success to the local SOCKS client</span>
                     </div>
                   </div>
@@ -1609,7 +1609,7 @@
             <article
               class="flow-step"
               data-title="SOCKS5 target accepted and mapped to a peer endpoint"
-              data-summary="handleClientConn reads the CONNECT target, resolves it through routes, and stamps the source endpoint as platformID/proxy."
+              data-summary="handleClientConn reads the CONNECT target, resolves it through routes, and stamps the source endpoint as nid/proxy."
               data-meta="Runtime path: pkg/tunnel/client.go handleClientConn -> resolveClientRoute"
               data-nodes="node-a"
               data-kinds="open"
@@ -1619,10 +1619,10 @@
               <p>
                 <code>socks5.Accept</code> returns the requested <code>host:port</code>. The node checks its
                 <code>routes</code> map and turns that address into a peer tuple such as
-                <code>10.253.15.168/ssh</code>.
+                <code>10.253.15.168/22</code>.
               </p>
               <p>
-                The outbound source is always <code>platformID/proxy</code>. A new random
+                The outbound source is always <code>nid/proxy</code>. A new random
                 <code>connectionID</code> is generated here, and that identity stays attached to every frame for the rest of the TCP session.
               </p>
             </article>
@@ -1638,7 +1638,7 @@
               <span class="step-index">03</span>
               <h3><code>KindOpen</code> enters Kafka as the session opener</h3>
               <p>
-                The first frame carries source platform and device, destination platform and device,
+                The first frame carries source <code>nid/eid</code>, destination <code>nid/eid</code>,
                 and the connection ID. The Kafka message key is the stable conversation key derived from both endpoints plus that ID.
               </p>
               <p>
@@ -1649,7 +1649,7 @@
             <article
               class="flow-step"
               data-title="Destination node filters the topic and dials the local service"
-              data-summary="Every node reads the same topic in its own consumer group. Only the frame whose DestinationPlatformID matches continues into serverOpenSession."
+              data-summary="Every node reads the same topic in its own consumer group. Only the frame whose DestinationNID matches continues into serverOpenSession."
               data-meta="Receive path: pkg/tunnel/node.go nodeReceiveLoop -> pkg/tunnel/server.go serverOpenSession"
               data-nodes="topic node-b service"
               data-kinds="open openack"
@@ -1658,8 +1658,8 @@
               <h3>Peer admission happens after topic fan-out</h3>
               <p>
                 Each node consumes the topic with a consumer group derived from its own
-                <code>platformID</code>. Frames addressed to some other platform are ignored. The matching node
-                resolves the destination <code>deviceID</code> through its <code>services</code> map and dials the local target, for example <code>ssh -> 127.0.0.1:22</code>.
+                <code>nid</code>. Frames addressed to some other node are ignored. The matching node
+                resolves the destination <code>eid</code> through its <code>services</code> map and dials the local target, for example <code>22 -> 127.0.0.1:22</code>.
               </p>
               <p>
                 If that dial succeeds, the peer registers an inbound session and sends <code>KindOpenAck</code>
@@ -1743,24 +1743,24 @@
             <pre><code>Magic                TKK1
 Version              3
 Kind                 Open | OpenAck | Ready | Data | Close | Error
-SourcePlatformID     10.253.15.167
-SourceDeviceID       proxy
-DestinationPlatformID 10.253.15.168
-DestinationDeviceID  ssh
+SourceNID          10.253.15.167
+SourceEID          proxy
+DestinationNID     10.253.15.168
+DestinationEID     22
 ConnectionID         7f3cbfe2d6a41c90
 Sequence             uint64 field in the schema
 Payload              raw TCP bytes for KindData
 Err                  text for KindError
 
-Kafka message key    10.253.15.167/proxy|10.253.15.168/ssh|7f3cbfe2d6a41c90</code></pre>
+Kafka message key    10.253.15.167/proxy|10.253.15.168/22|7f3cbfe2d6a41c90</code></pre>
           </div>
 
           <div class="facts">
             <div class="fact">
               <h3>Identity</h3>
               <p>
-                <code>platformID</code> names a node. <code>deviceID</code> names one service on that node.
-                Outbound sessions always originate from the fixed device <code>proxy</code>, which keeps reply routing deterministic.
+                <code>nid</code> names a node. <code>eid</code> names one service on that node.
+                Outbound sessions always originate from the fixed <code>eid</code> <code>proxy</code>, which keeps reply routing deterministic.
               </p>
             </div>
 
@@ -1775,7 +1775,7 @@ Kafka message key    10.253.15.167/proxy|10.253.15.168/ssh|7f3cbfe2d6a41c90</cod
               <h3>Admission control</h3>
               <p>
                 New readers start at <code>LastOffset</code>. Each node consumes the shared topic in its own
-                consumer group and filters by <code>DestinationPlatformID</code> before acting on a frame.
+                consumer group and filters by <code>DestinationNID</code> before acting on a frame.
               </p>
             </div>
 
@@ -1849,13 +1849,13 @@ Kafka message key    10.253.15.167/proxy|10.253.15.168/ssh|7f3cbfe2d6a41c90</cod
                   class="topology-packet ssh"
                   style="--x1: 3%; --y1: 22.5%; --x2: 30%; --y2: 29.2%; --duration: 9.2s; --delay: -0.7s;"
                 >
-                  CONNECT area-B:ssh
+                  CONNECT area-B:22
                 </div>
                 <div
                   class="topology-packet ssh detail-only"
                   style="--x1: 30%; --y1: 29.2%; --x2: 46.2%; --y2: 81%; --duration: 9s; --delay: -2.2s;"
                 >
-                  KindOpen dst=area-B/ssh
+                  KindOpen dst=area-B/22
                 </div>
                 <div
                   class="topology-packet ssh"
@@ -1886,7 +1886,7 @@ Kafka message key    10.253.15.167/proxy|10.253.15.168/ssh|7f3cbfe2d6a41c90</cod
                   class="topology-packet https"
                   style="--x1: 97%; --y1: 26.3%; --x2: 65.5%; --y2: 29.4%; --duration: 9.1s; --delay: -2.8s;"
                 >
-                  POST / -> area-A:web-service
+                  POST / -> area-A:443
                 </div>
                 <div
                   class="topology-packet https detail-only"
@@ -1898,7 +1898,7 @@ Kafka message key    10.253.15.167/proxy|10.253.15.168/ssh|7f3cbfe2d6a41c90</cod
                   class="topology-packet https"
                   style="--x1: 46.2%; --y1: 81%; --x2: 30%; --y2: 29.2%; --duration: 9s; --delay: -7.2s;"
                 >
-                  deliver area-A/web-service
+                  deliver area-A/443
                 </div>
                 <div
                   class="topology-packet https-reply detail-only"
@@ -1922,14 +1922,14 @@ Kafka message key    10.253.15.167/proxy|10.253.15.168/ssh|7f3cbfe2d6a41c90</cod
 
               <div class="topology-annotations">
                 <div class="topology-annotation ssh">
-                  <h3>User-A to area-B <code>ssh</code></h3>
+                  <h3>User-A to area-B <code>22</code></h3>
                   <p>
                     <strong>Contents</strong>
-                    The ingress capsule is the local SOCKS5 or <code>ProxyCommand</code> request naming <code>area-B:ssh</code>. After routing, the node emits <code>KindOpen</code> and then <code>KindData</code> carrying raw SSH bytes such as banner, KEXINIT, auth, and channel payload.
+                    The ingress capsule is the local SOCKS5 or <code>ProxyCommand</code> request naming <code>area-B:22</code>. After routing, the node emits <code>KindOpen</code> and then <code>KindData</code> carrying raw SSH bytes such as banner, KEXINIT, auth, and channel payload.
                   </p>
                   <p>
                     <strong>Trajectory</strong>
-                    User-A enters the area-A listener, the area-A node publishes to Kafka, the area-B node consumes because <code>DestinationPlatformID=area-B</code>, and the peer dials its local <code>ssh</code> socket. Reply traffic returns as <code>OpenAck</code>, <code>Ready</code>, and reverse <code>KindData</code>.
+                    User-A enters the area-A listener, the area-A node publishes to Kafka, the area-B node consumes because <code>DestinationNID=area-B</code>, and the peer dials its local <code>22</code> socket. Reply traffic returns as <code>OpenAck</code>, <code>Ready</code>, and reverse <code>KindData</code>.
                   </p>
                 </div>
 
@@ -1941,19 +1941,19 @@ Kafka message key    10.253.15.167/proxy|10.253.15.168/ssh|7f3cbfe2d6a41c90</cod
                   </p>
                   <p>
                     <strong>Trajectory</strong>
-                    Both nodes publish into one shared topic, consume in separate groups, and ignore frames whose destination platform does not match. Ordering comes from the stable conversation key derived from the two endpoints plus <code>ConnectionID</code>.
+                    Both nodes publish into one shared topic, consume in separate groups, and ignore frames whose destination <code>nid</code> does not match. Ordering comes from the stable conversation key derived from the two endpoints plus <code>ConnectionID</code>.
                   </p>
                 </div>
 
                 <div class="topology-annotation https">
-                  <h3>User-B to area-A <code>web-service</code></h3>
+                  <h3>User-B to area-A <code>443</code></h3>
                   <p>
                     <strong>Contents</strong>
                     The mirrored blue path shows the same state machine for HTTP. The forward stream carries a local POST request as <code>KindOpen</code> followed by <code>KindData</code>; the return stream carries the HTTP status line, headers, and body bytes back to User-B.
                   </p>
                   <p>
                     <strong>Trajectory</strong>
-                    User-B enters the area-B node, the broker relays frames to area-A, and the area-A node resolves <code>web-service</code> through its service map before dialing the local socket. Nothing about the protocol changes except the destination device and the TCP payload itself.
+                    User-B enters the area-B node, the broker relays frames to area-A, and the area-A node resolves <code>443</code> through its service map before dialing the local socket. Nothing about the protocol changes except the destination <code>eid</code> and the TCP payload itself.
                   </p>
                 </div>
               </div>
@@ -1998,7 +1998,7 @@ Kafka message key    10.253.15.167/proxy|10.253.15.168/ssh|7f3cbfe2d6a41c90</cod
 
           <a class="source-row" href="../pkg/tunnel/node.go">
             <span class="source-link">pkg/tunnel/node.go</span>
-            <p>Runs the symmetric node loop, filters frames by destination platform, and dispatches open, ready, data, close, and error handling.</p>
+            <p>Runs the symmetric node loop, filters frames by destination <code>nid</code>, and dispatches open, ready, data, close, and error handling.</p>
           </a>
 
           <a class="source-row" href="../pkg/tunnel/server.go">

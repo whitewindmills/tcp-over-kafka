@@ -19,30 +19,30 @@ var (
 	testNodeA = Config{
 		Broker:     "127.0.0.1:9092",
 		Topic:      "tcp-over-kafka",
-		PlatformID: "10.0.0.167",
+		NID:        "10.0.0.167",
 		ListenAddr: "127.0.0.1:12345",
 		Routes: map[string]Endpoint{
-			"10.0.0.168:22":  {PlatformID: "10.0.0.168", DeviceID: "ssh"},
-			"10.0.0.168:443": {PlatformID: "10.0.0.168", DeviceID: "web"},
+			"10.0.0.168:22":  {NID: "10.0.0.168", EID: "22"},
+			"10.0.0.168:443": {NID: "10.0.0.168", EID: "443"},
 		},
 		Services: map[string]string{
-			"ssh": "127.0.0.1:22",
-			"web": "127.0.0.1:443",
+			"22":  "127.0.0.1:22",
+			"443": "127.0.0.1:443",
 		},
 		MaxFrameSize: 128,
 	}
 	testNodeB = Config{
 		Broker:     "127.0.0.1:9092",
 		Topic:      "tcp-over-kafka",
-		PlatformID: "10.0.0.168",
+		NID:        "10.0.0.168",
 		ListenAddr: "127.0.0.1:12345",
 		Routes: map[string]Endpoint{
-			"10.0.0.167:22":  {PlatformID: "10.0.0.167", DeviceID: "ssh"},
-			"10.0.0.167:443": {PlatformID: "10.0.0.167", DeviceID: "web"},
+			"10.0.0.167:22":  {NID: "10.0.0.167", EID: "22"},
+			"10.0.0.167:443": {NID: "10.0.0.167", EID: "443"},
 		},
 		Services: map[string]string{
-			"ssh": "127.0.0.1:22",
-			"web": "127.0.0.1:443",
+			"22":  "127.0.0.1:22",
+			"443": "127.0.0.1:443",
 		},
 		MaxFrameSize: 128,
 	}
@@ -52,6 +52,13 @@ var (
 type testBus struct {
 	recv <-chan frame.Frame
 	send chan<- frame.Frame
+}
+
+type flakyReceiveBus struct {
+	recv        <-chan frame.Frame
+	send        chan<- frame.Frame
+	errsLeft    int
+	receiveHits int
 }
 
 func (b *testBus) Send(ctx context.Context, f frame.Frame) error {
@@ -76,6 +83,34 @@ func (b *testBus) Receive(ctx context.Context) (frame.Frame, error) {
 }
 
 func (b *testBus) Close() error { return nil }
+
+func (b *flakyReceiveBus) Send(ctx context.Context, f frame.Frame) error {
+	select {
+	case b.send <- f:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (b *flakyReceiveBus) Receive(ctx context.Context) (frame.Frame, error) {
+	b.receiveHits++
+	if b.errsLeft > 0 {
+		b.errsLeft--
+		return frame.Frame{}, errors.New("temporary receive failure")
+	}
+	select {
+	case f, ok := <-b.recv:
+		if !ok {
+			return frame.Frame{}, io.EOF
+		}
+		return f, nil
+	case <-ctx.Done():
+		return frame.Frame{}, ctx.Err()
+	}
+}
+
+func (b *flakyReceiveBus) Close() error { return nil }
 
 func newTestBusPair() (*testBus, *testBus) {
 	aToB := make(chan frame.Frame, 64)
@@ -398,4 +433,53 @@ func TestConcurrentSessionsIsolation(t *testing.T) {
 	cancel()
 	expectLoopExit(t, nodeAErr)
 	expectLoopExit(t, nodeBErr)
+}
+
+func TestNodeReceiveLoopRetriesTransientBusErrors(t *testing.T) {
+	t.Parallel()
+
+	prevDelay := nodeReceiveRetryDelay
+	nodeReceiveRetryDelay = 5 * time.Millisecond
+	defer func() {
+		nodeReceiveRetryDelay = prevDelay
+	}()
+
+	recv := make(chan frame.Frame, 1)
+	send := make(chan frame.Frame, 1)
+	bus := &flakyReceiveBus{
+		recv:     recv,
+		send:     send,
+		errsLeft: 1,
+	}
+	outbound := newClientRegistry()
+	inbound := newServerRegistry()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- nodeReceiveLoop(ctx, bus, outbound, inbound, testNodeA, dialerForHandlers(nil))
+	}()
+
+	recv <- frame.Frame{
+		Kind:           frame.KindClose,
+		SourceNID:      testNodeB.NID,
+		SourceEID:      "22",
+		DestinationNID: testNodeA.NID,
+		DestinationEID: "22",
+		ConnectionID:   "retry-check",
+	}
+
+	select {
+	case err := <-errCh:
+		t.Fatalf("node loop exited early: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	cancel()
+	expectLoopExit(t, errCh)
+	if bus.receiveHits < 2 {
+		t.Fatalf("receive hits = %d, want at least 2", bus.receiveHits)
+	}
 }

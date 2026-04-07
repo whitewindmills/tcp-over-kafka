@@ -207,6 +207,14 @@ wait_for_kubernetes_deployment() {
 	k8s_kubectl "$target" rollout status "deployment/${deployment}" --timeout="${KUBERNETES_ROLLOUT_TIMEOUT:-180s}"
 }
 
+# restart_kubernetes_deployment forces a fresh rollout even when the rendered
+# manifest is unchanged, so deploy-all always replaces the current Pods.
+restart_kubernetes_deployment() {
+	local target=$1
+	local deployment=$2
+	k8s_kubectl "$target" rollout restart "deployment/${deployment}"
+}
+
 # deploy_systemd_broker installs and enables the broker unit.
 deploy_systemd_broker() {
 	local remote
@@ -355,9 +363,11 @@ deploy_kubernetes_component() {
 	bash "${SCRIPT_DIR}/render-kubernetes.sh" "$target" | k8s_kubectl "$target" apply -f -
 	case "$target" in
 	node-a|node-b)
+		restart_kubernetes_deployment "$target" "$(k8s_node_service_name "$target")"
 		wait_for_kubernetes_deployment "$target" "$(k8s_node_service_name "$target")"
 		;;
 	broker)
+		restart_kubernetes_deployment broker tcp-over-kafka-broker
 		wait_for_kubernetes_deployment broker tcp-over-kafka-broker
 		;;
 	esac

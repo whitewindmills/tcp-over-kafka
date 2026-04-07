@@ -56,7 +56,7 @@ wait
 
 - Lower concurrency levels should complete without timeouts.
 - Each SSH or HTTPS request should remain isolated to its own connection ID.
-- Traffic should not be observed on the wrong destination device.
+- Traffic should not be observed on the wrong destination `eid`.
 - The first failure, if any, should indicate broker or target pressure rather
   than frame corruption.
 
@@ -77,9 +77,9 @@ wait
 
 ## Troubleshooting
 
-- If only HTTPS fails, verify that the local `services.web` mapping still points
+- If only HTTPS fails, verify that the local `services.443` mapping still points
   to `127.0.0.1:443` on both nodes.
 - If SSH and HTTPS interfere with each other, inspect the source and
-  destination platform/device IDs written into the open frames.
+  destination `nid/eid` values written into the open frames.
 - If both directions fail at once, check broker health and verify that both
   nodes are still subscribed to the shared topic.

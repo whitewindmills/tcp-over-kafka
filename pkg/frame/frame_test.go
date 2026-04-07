@@ -7,25 +7,25 @@ import (
 )
 
 type routedPayload struct {
-	SourcePlatformID      string `json:"sourcePlatformID"`
-	SourceDeviceID        string `json:"sourceDeviceID"`
-	DestinationPlatformID string `json:"destinationPlatformID"`
-	DestinationDeviceID   string `json:"destinationDeviceID"`
-	Message               string `json:"message"`
+	SourceNID      string `json:"sourceNID"`
+	SourceEID      string `json:"sourceEID"`
+	DestinationNID string `json:"destinationNID"`
+	DestinationEID string `json:"destinationEID"`
+	Message        string `json:"message"`
 }
 
 // TestRoundTrip verifies the current frame format is stable for all fields.
 func TestRoundTrip(t *testing.T) {
 	in := Frame{
-		Kind:                  KindData,
-		SourcePlatformID:      "10.0.0.167",
-		SourceDeviceID:        "client-42",
-		DestinationPlatformID: "10.0.0.168",
-		DestinationDeviceID:   "service-7",
-		ConnectionID:          "abc123",
-		Sequence:              42,
-		Payload:               []byte("hello"),
-		Err:                   "nope",
+		Kind:           KindData,
+		SourceNID:      "10.0.0.167",
+		SourceEID:      "client-42",
+		DestinationNID: "10.0.0.168",
+		DestinationEID: "service-7",
+		ConnectionID:   "abc123",
+		Sequence:       42,
+		Payload:        []byte("hello"),
+		Err:            "nope",
 	}
 	var buf bytes.Buffer
 	if err := Encode(&buf, in); err != nil {
@@ -36,10 +36,10 @@ func TestRoundTrip(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 	if out.Kind != in.Kind ||
-		out.SourcePlatformID != in.SourcePlatformID ||
-		out.SourceDeviceID != in.SourceDeviceID ||
-		out.DestinationPlatformID != in.DestinationPlatformID ||
-		out.DestinationDeviceID != in.DestinationDeviceID ||
+		out.SourceNID != in.SourceNID ||
+		out.SourceEID != in.SourceEID ||
+		out.DestinationNID != in.DestinationNID ||
+		out.DestinationEID != in.DestinationEID ||
 		out.ConnectionID != in.ConnectionID ||
 		out.Sequence != in.Sequence ||
 		out.Err != in.Err ||
@@ -75,11 +75,11 @@ func TestRejectUnsupportedVersion(t *testing.T) {
 // TestRoundTripCarriesRoutingEnvelope verifies the frame body preserves the routing IDs used by the single-topic design.
 func TestRoundTripCarriesRoutingEnvelope(t *testing.T) {
 	inbound := routedPayload{
-		SourcePlatformID:      "10.0.0.167",
-		SourceDeviceID:        "client-proc-42",
-		DestinationPlatformID: "10.0.0.168",
-		DestinationDeviceID:   "server-proc-7",
-		Message:               "hello over a shared topic",
+		SourceNID:      "10.0.0.167",
+		SourceEID:      "client-proc-42",
+		DestinationNID: "10.0.0.168",
+		DestinationEID: "server-proc-7",
+		Message:        "hello over a shared topic",
 	}
 	payload, err := json.Marshal(inbound)
 	if err != nil {
@@ -87,13 +87,13 @@ func TestRoundTripCarriesRoutingEnvelope(t *testing.T) {
 	}
 
 	in := Frame{
-		Kind:                  KindData,
-		SourcePlatformID:      inbound.SourcePlatformID,
-		SourceDeviceID:        inbound.SourceDeviceID,
-		DestinationPlatformID: inbound.DestinationPlatformID,
-		DestinationDeviceID:   inbound.DestinationDeviceID,
-		ConnectionID:          "opaque-connection",
-		Payload:               payload,
+		Kind:           KindData,
+		SourceNID:      inbound.SourceNID,
+		SourceEID:      inbound.SourceEID,
+		DestinationNID: inbound.DestinationNID,
+		DestinationEID: inbound.DestinationEID,
+		ConnectionID:   "opaque-connection",
+		Payload:        payload,
 	}
 
 	var buf bytes.Buffer
@@ -106,10 +106,10 @@ func TestRoundTripCarriesRoutingEnvelope(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 	if out.Kind != in.Kind ||
-		out.SourcePlatformID != in.SourcePlatformID ||
-		out.SourceDeviceID != in.SourceDeviceID ||
-		out.DestinationPlatformID != in.DestinationPlatformID ||
-		out.DestinationDeviceID != in.DestinationDeviceID ||
+		out.SourceNID != in.SourceNID ||
+		out.SourceEID != in.SourceEID ||
+		out.DestinationNID != in.DestinationNID ||
+		out.DestinationEID != in.DestinationEID ||
 		out.ConnectionID != in.ConnectionID {
 		t.Fatalf("frame metadata changed: %#v != %#v", out, in)
 	}

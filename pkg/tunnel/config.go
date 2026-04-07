@@ -11,7 +11,7 @@ import (
 const (
 	// DefaultMaxFrameSize bounds the payload size copied into one Kafka frame.
 	DefaultMaxFrameSize = 32 * 1024
-	proxyDeviceID       = "proxy"
+	proxyEID            = "proxy"
 	consumerGroupPrefix = "tcp-over-kafka.node."
 )
 
@@ -19,7 +19,7 @@ const (
 type Config struct {
 	Broker       string              `json:"broker"`
 	Topic        string              `json:"topic"`
-	PlatformID   string              `json:"platformID"`
+	NID          string              `json:"nid"`
 	ListenAddr   string              `json:"listen"`
 	MaxFrameSize int                 `json:"maxFrameSize"`
 	Routes       map[string]Endpoint `json:"routes"`
@@ -50,16 +50,16 @@ func (c *Config) applyDefaults() {
 	}
 }
 
-// ConsumerGroup derives the per-node Kafka consumer group from the PlatformID.
+// ConsumerGroup derives the per-node Kafka consumer group from the NID.
 func (c Config) ConsumerGroup() string {
-	return consumerGroupPrefix + strings.TrimSpace(c.PlatformID)
+	return consumerGroupPrefix + strings.TrimSpace(c.NID)
 }
 
 // ProxyEndpoint returns the fixed local endpoint used for outbound SOCKS sessions.
 func (c Config) ProxyEndpoint() Endpoint {
 	return Endpoint{
-		PlatformID: strings.TrimSpace(c.PlatformID),
-		DeviceID:   proxyDeviceID,
+		NID: strings.TrimSpace(c.NID),
+		EID: proxyEID,
 	}
 }
 
@@ -77,8 +77,8 @@ func (c Config) validate() error {
 	if strings.TrimSpace(c.Topic) == "" {
 		return fmt.Errorf("missing node topic")
 	}
-	if strings.TrimSpace(c.PlatformID) == "" {
-		return fmt.Errorf("missing node platform ID")
+	if strings.TrimSpace(c.NID) == "" {
+		return fmt.Errorf("missing node nid")
 	}
 	if len(c.Routes) == 0 {
 		return fmt.Errorf("missing node routes")
@@ -94,12 +94,12 @@ func (c Config) validate() error {
 	if len(c.Services) == 0 {
 		return fmt.Errorf("missing node service mappings")
 	}
-	for deviceID, targetAddr := range c.Services {
-		if strings.TrimSpace(deviceID) == "" {
-			return fmt.Errorf("invalid service mapping: missing device ID")
+	for eid, targetAddr := range c.Services {
+		if strings.TrimSpace(eid) == "" {
+			return fmt.Errorf("invalid service mapping: missing eid")
 		}
 		if _, _, err := net.SplitHostPort(strings.TrimSpace(targetAddr)); err != nil {
-			return fmt.Errorf("invalid service target %q for %q: %w", targetAddr, deviceID, err)
+			return fmt.Errorf("invalid service target %q for %q: %w", targetAddr, eid, err)
 		}
 	}
 	if c.MaxFrameSize <= 0 {

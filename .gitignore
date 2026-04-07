@@ -2,3 +2,6 @@
 __pycache__/
 *.test
 coverage.out
+
+.gemini/
+gha-creds-*.json

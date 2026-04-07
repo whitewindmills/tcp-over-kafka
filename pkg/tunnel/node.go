@@ -4,11 +4,14 @@ import (
 	"context"
 	"errors"
 	"net"
+	"time"
 
 	"k8s.io/klog/v2"
 
 	"tcp-over-kafka/pkg/frame"
 )
+
+var nodeReceiveRetryDelay = time.Second
 
 type busFactory func(broker, topic, group string) tunnelBus
 type listenFunc func(network, address string) (net.Listener, error)
@@ -65,11 +68,11 @@ func runNode(ctx context.Context, cfg Config, deps nodeDeps) error {
 	inboundSessions := newServerRegistry()
 
 	klog.Infof(
-		"Node listening on %s, topic=%s, broker=%s, platform=%s, group=%s",
+		"Node listening on %s, topic=%s, broker=%s, nid=%s, group=%s",
 		cfg.ListenAddr,
 		cfg.Topic,
 		cfg.Broker,
-		cfg.PlatformID,
+		cfg.NID,
 		cfg.ConsumerGroup(),
 	)
 
@@ -115,21 +118,29 @@ func nodeReceiveLoop(
 			if ctx.Err() != nil {
 				return nil
 			}
-			return err
+			klog.Errorf("Receive failed, retrying: %v", err)
+			timer := time.NewTimer(nodeReceiveRetryDelay)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return nil
+			case <-timer.C:
+				continue
+			}
 		}
-		if f.DestinationPlatformID != cfg.PlatformID {
+		if f.DestinationNID != cfg.NID {
 			continue
 		}
 
 		switch f.Kind {
 		case frame.KindOpen:
-			if err := serverOpenSession(ctx, bus, inboundSessions, cfg.PlatformID, cfg.Services, cfg.MaxFrameSize, dialContext, f); err != nil {
+			if err := serverOpenSession(ctx, bus, inboundSessions, cfg.NID, cfg.Services, cfg.MaxFrameSize, dialContext, f); err != nil {
 				klog.Errorf("Open session failed: %v", err)
 				_ = sendErrorFrame(
 					context.Background(),
 					bus,
-					Endpoint{PlatformID: cfg.PlatformID, DeviceID: f.DestinationDeviceID},
-					Endpoint{PlatformID: f.SourcePlatformID, DeviceID: f.SourceDeviceID},
+					Endpoint{NID: cfg.NID, EID: f.DestinationEID},
+					Endpoint{NID: f.SourceNID, EID: f.SourceEID},
 					f.ConnectionID,
 					err.Error(),
 				)
@@ -199,12 +210,12 @@ func nodeReceiveLoop(
 
 func sendErrorFrame(ctx context.Context, bus tunnelBus, source, destination Endpoint, connectionID, errText string) error {
 	return bus.Send(ctx, frame.Frame{
-		Kind:                  frame.KindError,
-		SourcePlatformID:      source.PlatformID,
-		SourceDeviceID:        source.DeviceID,
-		DestinationPlatformID: destination.PlatformID,
-		DestinationDeviceID:   destination.DeviceID,
-		ConnectionID:          connectionID,
-		Err:                   errText,
+		Kind:           frame.KindError,
+		SourceNID:      source.NID,
+		SourceEID:      source.EID,
+		DestinationNID: destination.NID,
+		DestinationEID: destination.EID,
+		ConnectionID:   connectionID,
+		Err:            errText,
 	})
 }

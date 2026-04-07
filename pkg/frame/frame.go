@@ -26,15 +26,15 @@ const (
 )
 
 type Frame struct {
-	Kind                  Kind
-	SourcePlatformID      string
-	SourceDeviceID        string
-	DestinationPlatformID string
-	DestinationDeviceID   string
-	ConnectionID          string
-	Sequence              uint64
-	Payload               []byte
-	Err                   string
+	Kind           Kind
+	SourceNID      string
+	SourceEID      string
+	DestinationNID string
+	DestinationEID string
+	ConnectionID   string
+	Sequence       uint64
+	Payload        []byte
+	Err            string
 }
 
 // MarshalBinary encodes a frame into the on-the-wire binary representation.
@@ -60,16 +60,16 @@ func Encode(w io.Writer, f Frame) error {
 	if err := binary.Write(w, binary.BigEndian, uint16(0)); err != nil {
 		return err
 	}
-	if err := writeString(w, f.SourcePlatformID); err != nil {
+	if err := writeString(w, f.SourceNID); err != nil {
 		return err
 	}
-	if err := writeString(w, f.SourceDeviceID); err != nil {
+	if err := writeString(w, f.SourceEID); err != nil {
 		return err
 	}
-	if err := writeString(w, f.DestinationPlatformID); err != nil {
+	if err := writeString(w, f.DestinationNID); err != nil {
 		return err
 	}
-	if err := writeString(w, f.DestinationDeviceID); err != nil {
+	if err := writeString(w, f.DestinationEID); err != nil {
 		return err
 	}
 	if err := writeString(w, f.ConnectionID); err != nil {
@@ -118,10 +118,10 @@ func Decode(r io.Reader) (Frame, error) {
 	if err != nil {
 		return f, err
 	}
-	f.SourcePlatformID = srcPlatform
-	f.SourceDeviceID = srcDevice
-	f.DestinationPlatformID = dstPlatform
-	f.DestinationDeviceID = dstDevice
+	f.SourceNID = srcPlatform
+	f.SourceEID = srcDevice
+	f.DestinationNID = dstPlatform
+	f.DestinationEID = dstDevice
 	f.ConnectionID = connectionID
 	if err := binary.Read(r, binary.BigEndian, &f.Sequence); err != nil {
 		return f, err

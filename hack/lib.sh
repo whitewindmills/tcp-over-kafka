@@ -161,17 +161,17 @@ write_runtime_env_file() {
 write_node_config_file() {
 	local node=$1
 	local output_file=$2
-	local platform_id listen_addr max_frame routes_json services_json
+	local nid listen_addr max_frame routes_json services_json
 
 	require_command jq
 
-	platform_id="$(node_value "$node" PLATFORM_ID)"
+	nid="$(node_value "$node" NID)"
 	listen_addr="$(node_value "$node" LISTEN_ADDR)"
 	max_frame="$(node_value "$node" MAX_FRAME_SIZE)"
 	routes_json="$(node_value "$node" ROUTES_JSON)"
 	services_json="$(node_value "$node" SERVICES_JSON)"
 
-	[ -n "$platform_id" ] || die "missing ${node} platform ID"
+	[ -n "$nid" ] || die "missing ${node} NID"
 	[ -n "$listen_addr" ] || die "missing ${node} listen address"
 	[ -n "$max_frame" ] || die "missing ${node} max frame size"
 	[ -n "$routes_json" ] || die "missing ${node} routes json"
@@ -180,7 +180,7 @@ write_node_config_file() {
 	jq -n \
 		--arg broker "${BROKER_ADDR}" \
 		--arg topic "${KAFKA_TOPIC}" \
-		--arg platformID "${platform_id}" \
+		--arg nid "${nid}" \
 		--arg listen "${listen_addr}" \
 		--argjson maxFrameSize "${max_frame}" \
 		--argjson routes "${routes_json}" \
@@ -188,7 +188,7 @@ write_node_config_file() {
 		'{
 			broker: $broker,
 			topic: $topic,
-			platformID: $platformID,
+			nid: $nid,
 			listen: $listen,
 			maxFrameSize: $maxFrameSize,
 			routes: $routes,
@@ -250,6 +250,11 @@ k8s_namespace_for() {
 	esac
 }
 
+# dual_kubernetes_node_mode returns success when both logical nodes deploy to Kubernetes.
+dual_kubernetes_node_mode() {
+	[ "$(deploy_mode_for node-a)" = "kubernetes" ] && [ "$(deploy_mode_for node-b)" = "kubernetes" ]
+}
+
 # k8s_kubeconfig_env_value_for returns the effective KUBECONFIG value for a component.
 k8s_kubeconfig_env_value_for() {
 	case "$1" in
@@ -264,11 +269,17 @@ k8s_kubeconfig_env_value_for() {
 			printf '%s' "${NODE_A_KUBECONFIG}"
 			return
 		fi
+		if dual_kubernetes_node_mode; then
+			die "dual-kubernetes node mode requires NODE_A_KUBECONFIG; refusing to fall back to a shared default kubeconfig"
+		fi
 		;;
 	node-b)
 		if [ -n "${NODE_B_KUBECONFIG:-}" ]; then
 			printf '%s' "${NODE_B_KUBECONFIG}"
 			return
+		fi
+		if dual_kubernetes_node_mode; then
+			die "dual-kubernetes node mode requires NODE_B_KUBECONFIG; refusing to fall back to a shared default kubeconfig"
 		fi
 		;;
 	*)
@@ -322,12 +333,42 @@ require_kubernetes_kubeconfig_files() {
 	done
 }
 
+# k8s_api_server_for returns the configured Kubernetes API server URL for one component.
+k8s_api_server_for() {
+	k8s_config_view "$1" --minify --raw -o jsonpath='{.clusters[0].cluster.server}'
+}
+
+# require_dual_kubernetes_node_separation prevents both logical nodes from
+# silently targeting the same cluster unless they are pinned to distinct
+# Kubernetes node names.
+require_dual_kubernetes_node_separation() {
+	local node_a_server node_b_server node_a_name node_b_name
+
+	dual_kubernetes_node_mode || return 0
+
+	node_a_server="$(k8s_api_server_for node-a)"
+	node_b_server="$(k8s_api_server_for node-b)"
+	[ -n "${node_a_server}" ] || die "failed to read kubernetes API server from kubeconfig for node-a"
+	[ -n "${node_b_server}" ] || die "failed to read kubernetes API server from kubeconfig for node-b"
+
+	if [ "${node_a_server}" != "${node_b_server}" ]; then
+		return 0
+	fi
+
+	node_a_name="$(k8s_node_name_for node-a)"
+	node_b_name="$(k8s_node_name_for node-b)"
+	if [ -z "${node_a_name}" ] || [ -z "${node_b_name}" ]; then
+		die "node-a and node-b resolve to the same kubernetes API server (${node_a_server}); configure distinct NODE_A_KUBECONFIG/NODE_B_KUBECONFIG or set distinct NODE_A_K8S_NODE_NAME/NODE_B_K8S_NODE_NAME"
+	fi
+	[ "${node_a_name}" != "${node_b_name}" ] || die "node-a and node-b resolve to the same kubernetes API server (${node_a_server}) and the same Kubernetes node name (${node_a_name})"
+}
+
 # require_kubernetes_api_host_resolution validates that the kubeconfig API server hostname resolves locally.
 require_kubernetes_api_host_resolution() {
 	local component=$1
 	local server_url server_host
 	require_command getent
-	server_url="$(k8s_config_view "$component" --minify --raw -o jsonpath='{.clusters[0].cluster.server}')"
+	server_url="$(k8s_api_server_for "$component")"
 	[ -n "${server_url}" ] || die "failed to read kubernetes API server from kubeconfig for ${component}"
 	server_host="${server_url#*://}"
 	server_host="${server_host%%/*}"
@@ -361,6 +402,7 @@ require_kubernetes_component_prereqs() {
 	require_kubernetes_api_host_resolution "$component"
 	case "$component" in
 	node-a | node-b)
+		require_dual_kubernetes_node_separation
 		require_kubernetes_fixture_material
 		;;
 	esac
