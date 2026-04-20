@@ -61,6 +61,26 @@ type flakyReceiveBus struct {
 	receiveHits int
 }
 
+type temporaryReceiveError struct {
+	err error
+}
+
+func (e temporaryReceiveError) Error() string {
+	return e.err.Error()
+}
+
+func (e temporaryReceiveError) Unwrap() error {
+	return e.err
+}
+
+func (temporaryReceiveError) Temporary() bool {
+	return true
+}
+
+type permanentReceiveBus struct {
+	err error
+}
+
 func (b *testBus) Send(ctx context.Context, f frame.Frame) error {
 	select {
 	case b.send <- f:
@@ -97,7 +117,7 @@ func (b *flakyReceiveBus) Receive(ctx context.Context) (frame.Frame, error) {
 	b.receiveHits++
 	if b.errsLeft > 0 {
 		b.errsLeft--
-		return frame.Frame{}, errors.New("temporary receive failure")
+		return frame.Frame{}, temporaryReceiveError{err: errors.New("temporary receive failure")}
 	}
 	select {
 	case f, ok := <-b.recv:
@@ -111,6 +131,14 @@ func (b *flakyReceiveBus) Receive(ctx context.Context) (frame.Frame, error) {
 }
 
 func (b *flakyReceiveBus) Close() error { return nil }
+
+func (b *permanentReceiveBus) Send(context.Context, frame.Frame) error { return nil }
+
+func (b *permanentReceiveBus) Receive(context.Context) (frame.Frame, error) {
+	return frame.Frame{}, b.err
+}
+
+func (b *permanentReceiveBus) Close() error { return nil }
 
 func newTestBusPair() (*testBus, *testBus) {
 	aToB := make(chan frame.Frame, 64)
@@ -481,5 +509,31 @@ func TestNodeReceiveLoopRetriesTransientBusErrors(t *testing.T) {
 	expectLoopExit(t, errCh)
 	if bus.receiveHits < 2 {
 		t.Fatalf("receive hits = %d, want at least 2", bus.receiveHits)
+	}
+}
+
+func TestNodeReceiveLoopReturnsPermanentBusErrors(t *testing.T) {
+	t.Parallel()
+
+	wantErr := errors.New("permanent receive failure")
+	bus := &permanentReceiveBus{err: wantErr}
+	outbound := newClientRegistry()
+	inbound := newServerRegistry()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- nodeReceiveLoop(ctx, bus, outbound, inbound, testNodeA, dialerForHandlers(nil))
+	}()
+
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, wantErr) {
+			t.Fatalf("node loop error = %v, want %v", err, wantErr)
+		}
+	case <-time.After(50 * time.Millisecond):
+		t.Fatal("node loop did not exit on permanent receive error")
 	}
 }

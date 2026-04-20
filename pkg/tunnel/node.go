@@ -3,7 +3,9 @@ package tunnel
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
+	"syscall"
 	"time"
 
 	"k8s.io/klog/v2"
@@ -12,6 +14,10 @@ import (
 )
 
 var nodeReceiveRetryDelay = time.Second
+
+type temporaryError interface {
+	Temporary() bool
+}
 
 type busFactory func(broker, topic, group string) tunnelBus
 type listenFunc func(network, address string) (net.Listener, error)
@@ -118,6 +124,9 @@ func nodeReceiveLoop(
 			if ctx.Err() != nil {
 				return nil
 			}
+			if !isRetryableReceiveError(err) {
+				return err
+			}
 			klog.Errorf("Receive failed, retrying: %v", err)
 			timer := time.NewTimer(nodeReceiveRetryDelay)
 			select {
@@ -206,6 +215,23 @@ func nodeReceiveLoop(
 			klog.Warningf("Unknown frame kind: %d", f.Kind)
 		}
 	}
+}
+
+func isRetryableReceiveError(err error) bool {
+	var tempErr temporaryError
+	if errors.As(err, &tempErr) && tempErr.Temporary() {
+		return true
+	}
+
+	var netErr net.Error
+	if errors.As(err, &netErr) && (netErr.Timeout() || netErr.Temporary()) {
+		return true
+	}
+
+	return errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, syscall.ECONNREFUSED) ||
+		errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, syscall.EPIPE)
 }
 
 func sendErrorFrame(ctx context.Context, bus tunnelBus, source, destination Endpoint, connectionID, errText string) error {
